@@ -6,4 +6,5 @@
 ## SavedVariables: BarsmithDB
 ## X-Curse-Project-ID: 1778365
 
+Bindings.lua
 Barsmith.lua

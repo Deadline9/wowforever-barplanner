@@ -16,8 +16,7 @@
 Barsmith = Barsmith or {}
 local BP = Barsmith
 
-local PREFIX = "BP1:"
-local FORMAT_VERSION = 1
+local B = BP.bindings
 local DEFAULT_ICON = "INV_Misc_QuestionMark"
 local MACRO_BODY_MAX = 255
 
@@ -107,7 +106,7 @@ local function allCommands()
 end
 
 ------------------------------------------------------------------------
--- Plan string: "BP1:" + base64 of UTF-8 text, one record per line,
+-- Plan string: "BP2:" (legacy "BP1:" also accepted) + base64 of UTF-8 text, one record per line,
 -- fields separated by tabs. Backslash, tab and newline inside a field
 -- are written as \\, \t and \n.
 --   BARPLAN <version>
@@ -116,7 +115,8 @@ end
 --   NAME    <plan name>
 --   MACRO   <name> <icon> <0|1 per character> <body>
 --   SLOT    <slot> <spell|macro|item|clear> <value>
---   BIND    <key> <command>
+--   ENSURE | REMOVE <key> <command>; ALLOWORPHAN <command>
+--   BP1 only: BIND <key> <command> (exact keys on each named command)
 -- No WoW API is used in this section, so it can be tested outside the game.
 ------------------------------------------------------------------------
 
@@ -196,16 +196,18 @@ end
 function BP.parse(text)
     text = trim(text)
     if text == "" then return nil, "Paste a plan string first." end
-    if text:sub(1, #PREFIX) ~= PREFIX then
-        return nil, "That isn't a plan string. It should start with " .. PREFIX
-    end
-    local raw = BP.b64decode(text:sub(#PREFIX + 1))
+    local expected = tonumber(text:match("^BP([12]):"))
+    if not expected then return nil, "Paste a BP2 or legacy BP1 plan." end
+    local payload = text:sub(5):gsub("%s+", "")
+    local raw = BP.b64decode(payload)
+    if expected == 2 and BP.b64encode(raw) ~= payload then return nil, "Invalid BP2 encoding." end
     local plan = { name = "", macros = {}, slots = {}, binds = {} }
     local version
     for line in raw:gmatch("[^\n]+") do
         local f = splitTabs((line:gsub("\r$", "")))
         local kind = f[1]
         if kind == "BARPLAN" then
+            if version then return nil, "Duplicate plan header." end
             version = tonumber(f[2])
         elseif kind == "CLASS" then
             plan.class = f[2]
@@ -219,21 +221,27 @@ function BP.parse(text)
             }
         elseif kind == "SLOT" and tonumber(f[2]) and f[3] then
             plan.slots[#plan.slots + 1] = { slot = tonumber(f[2]), kind = f[3], value = trim(unesc(f[4])) }
-        elseif kind == "BIND" and f[2] and f[2] ~= "" and f[3] and f[3] ~= "" then
-            plan.binds[#plan.binds + 1] = { key = f[2], command = f[3] }
+        elseif kind == "BIND" or kind == "ENSURE" or kind == "REMOVE" or kind == "ALLOWORPHAN" then
+            if (kind == "BIND") ~= (expected == 1) then return nil, "Wrong binding syntax for this plan version." end
+            local ack = kind == "ALLOWORPHAN"
+            if #f ~= (ack and 2 or 3) or f[2] == "" or f[3] == "" then return nil, "Invalid " .. kind .. " record." end
+            local command = f[ack and 2 or 3]
+            if expected == 2 then command = unesc(command) end
+            local key
+            if not ack then key = B.key(expected == 2 and unesc(f[2]) or f[2]) end
+            plan.binds[#plan.binds + 1] = { op = kind, command = command, key = key }
+        elseif expected == 2 then
+            return nil, "Unknown or malformed record: " .. kind
         end
     end
-    if not version then
-        return nil, "The plan string is damaged. Copy it again from the planner."
-    end
-    if version > FORMAT_VERSION then
-        return nil, "This plan was made by a newer version of the page. Update the Barsmith addon."
-    end
+    if version ~= expected then return nil, "Plan header and prefix must match." end
+    plan.version = version
     return plan
 end
 
 function BP.serialize(plan)
-    local lines = { "BARPLAN\t" .. FORMAT_VERSION }
+    local version = plan.version or 2
+    local lines = { "BARPLAN\t" .. version }
     if plan.class then lines[#lines + 1] = "CLASS\t" .. plan.class end
     if plan.race then lines[#lines + 1] = "RACE\t" .. esc(plan.race) end
     if plan.name and plan.name ~= "" then lines[#lines + 1] = "NAME\t" .. esc(plan.name) end
@@ -244,9 +252,11 @@ function BP.serialize(plan)
         lines[#lines + 1] = table.concat({ "SLOT", s.slot, s.kind, esc(s.value) }, "\t")
     end
     for _, b in ipairs(plan.binds or {}) do
-        lines[#lines + 1] = table.concat({ "BIND", b.key, b.command }, "\t")
+        if version == 1 then lines[#lines + 1] = table.concat({ "BIND", b.key, b.command }, "\t")
+        elseif b.op == "ALLOWORPHAN" then lines[#lines + 1] = "ALLOWORPHAN\t" .. esc(b.command)
+        else lines[#lines + 1] = table.concat({ b.op or "ENSURE", esc(b.key), esc(b.command) }, "\t") end
     end
-    return PREFIX .. BP.b64encode(table.concat(lines, "\n"))
+    return "BP" .. version .. ":" .. BP.b64encode(table.concat(lines, "\n"))
 end
 
 -- Everything below needs the game client.
@@ -484,6 +494,13 @@ local function applySlots(plan, dry, r)
     local _, class = UnitClass("player")
     for _, s in ipairs(slotsWithCopies(plan, class)) do
         local label = slotLabel(s.slot)
+        local function detail(action)
+            if not dry then return end
+            local kind, id = GetActionInfo(s.slot)
+            local current = kind and (kind .. " " .. tostring(id)) or "empty"
+            r.slotDetails[#r.slotDetails + 1] = ("%s [%d%s]: %s -> %s"):format(
+                label, s.slot, s.copy and ", compatibility copy" or "", current, action)
+        end
         if s.copy then
             -- Copies are counted on their own; anything wrong with them is already reported for the original.
             local target
@@ -495,18 +512,23 @@ local function applySlots(plan, dry, r)
             end
             if s.kind == "clear" then
                 if HasAction(s.slot) then
+                    detail("empty")
                     if not dry then PickupAction(s.slot); ClearCursor() end
                     r.copied = r.copied + 1
                 end
             elseif target and slotHolds(s.slot, target) then
                 r.copiedSame = r.copiedSame + 1
             elseif target and (dry or placeTarget(s.slot, target)) then
+                detail(s.kind .. " " .. s.value)
                 r.copied = r.copied + 1
+            elseif not target and s.kind ~= "clear" then
+                detail("keep current (skipped " .. s.value .. ")")
             elseif target then
                 r.problems[#r.problems + 1] = label .. ": couldn't place the copy of " .. s.value .. "."
             end
         elseif s.kind == "clear" then
             if HasAction(s.slot) then
+                detail("empty")
                 if not dry then PickupAction(s.slot); ClearCursor() end
                 r.cleared = r.cleared + 1
             end
@@ -524,6 +546,7 @@ local function applySlots(plan, dry, r)
             else
                 why = "unknown slot type " .. tostring(s.kind)
             end
+            if not target then detail("keep current (skipped " .. s.value .. ")") end
             if not target and why == "not learned yet" then
                 r.notLearned[#r.notLearned + 1] = s.value
             elseif not target and why == "not in bags" then
@@ -534,6 +557,7 @@ local function applySlots(plan, dry, r)
             elseif slotHolds(s.slot, target) then
                 r.same = r.same + 1
             elseif dry then
+                detail(s.kind .. " " .. s.value)
                 r.placed = r.placed + 1
             elseif placeTarget(s.slot, target) then
                 r.placed = r.placed + 1
@@ -544,46 +568,24 @@ local function applySlots(plan, dry, r)
     end
 end
 
-local function applyBinds(plan, dry, r)
-    if #plan.binds == 0 then return end
-    local changed = {}
-    for _, b in ipairs(plan.binds) do
-        if GetBindingAction(b.key) ~= b.command then changed[#changed + 1] = b end
-    end
-    if dry then
-        r.bound = #changed
-        r.bindsSame = #plan.binds - #changed
-        return
-    end
-    -- Take the old keys off every planned command first, so each planned
-    -- button ends up with exactly the planned key.
-    local cmds = {}
-    for _, b in ipairs(plan.binds) do cmds[b.command] = true end
-    for cmd in pairs(cmds) do
-        local keys = { GetBindingKey(cmd) }
-        for _, k in ipairs(keys) do SetBinding(k) end
-    end
-    for _, b in ipairs(plan.binds) do
-        SetBinding(b.key, b.command)
-        if GetBindingAction(b.key) ~= b.command then
-            r.problems[#r.problems + 1] = "Key " .. b.key .. ": the game didn't accept it."
-        end
-    end
-    r.bound = #changed
-    r.bindsSame = #plan.binds - #changed
-    SaveBindings(GetCurrentBindingSet())
-end
-
-function BP.apply(plan, dry)
+function BP.apply(plan, dry, preview)
     local r = {
         placed = 0, same = 0, cleared = 0, macrosNew = 0, macrosChanged = 0, macrosSame = 0,
         bound = 0, bindsSame = 0, notLearned = {}, notInBags = {}, skipped = {}, problems = {},
-        copied = 0, copiedSame = 0,
+        copied = 0, copiedSame = 0, slotDetails = {},
     }
+    if #plan.binds > 0 then
+        if not preview then return nil, "Run Check on this plan before Apply." end
+        r.binding = preview
+        r.bound, r.bindsSame = #preview.changes, preview.same
+        if not dry then
+            local ok, err = B.commit(plan, preview)
+            if not ok then return nil, err end
+        end
+    end
     applyMacros(plan, dry, r)
     applySlots(plan, dry, r)
-    applyBinds(plan, dry, r)
-    ClearCursor()
+    if not dry and #plan.slots > 0 then ClearCursor() end
     return r
 end
 
@@ -595,6 +597,14 @@ local function reportLines(r, dry)
     else
         lines[1] = ("Done: %d slots filled, %d already right, %d cleared. Macros: %d new, %d changed. Keys: %d set.")
             :format(r.placed, r.same, r.cleared, r.macrosNew, r.macrosChanged, r.bound)
+    end
+    if r.binding then
+        local binding = r.binding
+        table.insert(lines, 1, (#binding.errors > 0 and "BLOCKED" or "Bindings") .. " - "
+            .. (binding.before.set == 1 and "account-wide" or "character-specific")
+            .. (binding.legacy and " (BP1 exact replacement)" or " (BP2)"))
+        for _, msg in ipairs(binding.errors) do lines[#lines + 1] = "|cffff6060" .. msg .. "|r" end
+        for _, msg in ipairs(binding.lines) do lines[#lines + 1] = msg end
     end
     if r.copied + r.copiedSame > 0 then
         local _, class = UnitClass("player")
@@ -609,6 +619,7 @@ local function reportLines(r, dry)
     if #r.notInBags > 0 then
         lines[#lines + 1] = ("Not in your bags, skipped (%d): %s"):format(#r.notInBags, table.concat(r.notInBags, ", "))
     end
+    for _, s in ipairs(r.slotDetails) do lines[#lines + 1] = s end
     for _, s in ipairs(r.skipped) do lines[#lines + 1] = "Skipped " .. s end
     for _, p in ipairs(r.problems) do lines[#lines + 1] = "|cffff6060" .. p .. "|r" end
     return lines
@@ -659,8 +670,9 @@ function BP.exportCurrent()
         end
     end
     for _, cmd in ipairs(allCommands()) do
-        local key = GetBindingKey(cmd)
-        if key then plan.binds[#plan.binds + 1] = { key = key, command = cmd } end
+        for _, key in pairs({ GetBindingKey(cmd) }) do
+            plan.binds[#plan.binds + 1] = { key = key, command = cmd }
+        end
     end
     return BP.serialize(plan)
 end
@@ -674,13 +686,14 @@ local frame
 local function showStatus(lines)
     for _, l in ipairs(lines) do say(l) end
     if not frame then return end
-    local shown = {}
-    for i = 1, math.min(#lines, 6) do shown[i] = lines[i] end
-    if #lines > 6 then shown[#shown + 1] = "... " .. (#lines - 6) .. " more lines in chat." end
-    frame.status:SetText(table.concat(shown, "\n"))
+    frame.status:SetText(table.concat(lines, "\n"))
+    frame.reportBody:SetHeight(math.max(1, frame.status:GetStringHeight() + 4))
+    frame.report:SetVerticalScroll(0)
 end
 
+local checked
 function BP.run(text, dry)
+    if dry then checked = nil end
     if InCombatLockdown() then
         showStatus({ "Can't change bars or keys in combat. Try again after the fight." })
         return
@@ -696,7 +709,21 @@ function BP.run(text, dry)
             :format(plan.class:lower(), myClass:lower()) })
         return
     end
-    local r = BP.apply(plan, dry)
+    local preview
+    if #plan.binds > 0 then
+        if dry then
+            local ok, result = pcall(function() return B.preview(plan, B.capture(plan.binds)) end)
+            if not ok then showStatus({ "Check blocked: " .. tostring(result) }); return end
+            preview = result
+            preview.legacy = plan.version == 1
+        elseif checked and checked.text == trim(text) then
+            preview = checked.preview
+            checked = nil
+        else showStatus({ "Run a successful Check on this exact plan before Apply." }); return end
+    end
+    local ok, r, failure = pcall(BP.apply, plan, dry, preview)
+    if not ok or not r then showStatus({ "Stopped: " .. tostring(failure or r) }); return end
+    if dry and preview and #preview.errors == 0 then checked = { text = trim(text), preview = preview } end
     if not dry then BarsmithDB.last = trim(text) end
     showStatus(reportLines(r, dry))
 end
@@ -746,12 +773,20 @@ local function buildFrame()
     scroll:SetScript("OnMouseDown", function() edit:SetFocus() end)
     f.edit = edit
 
-    local status = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    status:SetPoint("TOPLEFT", scroll, "BOTTOMLEFT", 0, -12)
-    status:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 46)
+    local report = CreateFrame("ScrollFrame", "BarsmithReport", f, "UIPanelScrollFrameTemplate")
+    report:SetPoint("TOPLEFT", scroll, "BOTTOMLEFT", 0, -12)
+    report:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -38, 46)
+    local body = CreateFrame("Frame", nil, report)
+    body:SetSize(560, 1)
+    report:SetScrollChild(body)
+    local status = body:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    status:SetPoint("TOPLEFT")
+    status:SetWidth(558)
     status:SetJustifyH("LEFT")
     status:SetJustifyV("TOP")
     status:SetWordWrap(true)
+    f.reportBody = body
+    f.report = report
     f.status = status
 
     local function button(text, x, width, onClick)
@@ -762,15 +797,23 @@ local function buildFrame()
         b:SetScript("OnClick", onClick)
         return b
     end
-    button("Check", 16, 90, function() edit:ClearFocus(); BP.run(edit:GetText(), true) end)
-    button("Apply", 110, 90, function() edit:ClearFocus(); BP.run(edit:GetText(), false) end)
-    button("Export my bars", 204, 130, function()
+    button("Check", 16, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), true) end)
+    button("Apply", 88, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), false) end)
+    button("Export my bars", 160, 117, function()
         edit:SetText(BP.exportCurrent())
         edit:SetFocus()
         edit:HighlightText()
         status:SetText("This is your current setup. Press Ctrl+C to copy it, then use Load in the planner.")
     end)
-    button("Clear", 338, 70, function() edit:SetText(""); edit:SetFocus() end)
+    button("Clear", 281, 55, function() edit:SetText(""); edit:SetFocus() end)
+    button("Census", 338, 72, function()
+        local ok, snapshot = pcall(B.census, esc)
+        if not ok then showStatus({ "Census failed: " .. tostring(snapshot) }); return end
+        edit:SetText(snapshot)
+        edit:SetFocus()
+        edit:HighlightText()
+        status:SetText("Copy this read-only BC1 census. Load it into the planner with your plan open.")
+    end)
 
     local auto = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
     auto:SetSize(24, 24)
@@ -859,7 +902,7 @@ SLASH_BARSMITH1 = "/barsmith"
 SlashCmdList.BARSMITH = function(msg)
     msg = trim(msg):lower()
     if msg == "apply" then
-        if BarsmithDB.last then BP.run(BarsmithDB.last, false)
+        if BarsmithDB.last then openFrame(BarsmithDB.last); BP.run(BarsmithDB.last, true)
         else say("No plan applied yet. Type /barsmith and paste one.") end
     elseif msg == "auto" then
         BarsmithDB.auto = not BarsmithDB.auto
