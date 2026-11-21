@@ -351,7 +351,9 @@ local function spellbookEntries()
             end
         else
             name, rank, spellID = GetSpellBookItemName(i, BOOK)
-            local kind = GetSpellBookItemInfo and GetSpellBookItemInfo(i, BOOK)
+            local kind, bookID
+            if GetSpellBookItemInfo then kind, bookID = GetSpellBookItemInfo(i, BOOK) end
+            spellID = spellID or bookID
             usable = name and kind == "SPELL" and not (IsPassiveSpell and IsPassiveSpell(i, BOOK))
         end
         if usable then
@@ -501,14 +503,21 @@ local function applySlots(plan, dry, r)
             r.slotDetails[#r.slotDetails + 1] = ("%s [%d%s]: %s -> %s"):format(
                 label, s.slot, s.copy and ", compatibility copy" or "", current, action)
         end
-        if s.copy then
+        -- An installed action can outlive its spellbook entry or inventory item.
+        -- Its exact ID proves a no-op only on this slot, never on another slot.
+        local kind, id = GetActionInfo(s.slot)
+        local exact = (kind == "spell" or kind == "item") and id and s.kind == kind and s.value == kind .. ":" .. id
+        if exact then
+            detail("already correct")
+            if s.copy then r.copiedSame = r.copiedSame + 1 else r.same = r.same + 1 end
+        elseif s.copy then
             -- Copies are counted on their own; anything wrong with them is already reported for the original.
-            local target
-            if s.kind == "spell" then target = resolveSpell(s.value, book)
+            local target, why
+            if s.kind == "spell" then target, why = resolveSpell(s.value, book)
             elseif s.kind == "macro" then
-                target = resolveMacro(s.value)
+                target, why = resolveMacro(s.value)
                 if not target and dry and planMacros[s.value:lower()] then target = { kind = "macro", id = -1 } end
-            elseif s.kind == "item" then target = resolveItem(s.value)
+            elseif s.kind == "item" then target = resolveItem(s.value, s.slot)
             end
             if s.kind == "clear" then
                 if HasAction(s.slot) then
@@ -517,12 +526,14 @@ local function applySlots(plan, dry, r)
                     r.copied = r.copied + 1
                 end
             elseif target and slotHolds(s.slot, target) then
+                detail("already correct")
                 r.copiedSame = r.copiedSame + 1
             elseif target and (dry or placeTarget(s.slot, target)) then
                 detail(s.kind .. " " .. s.value)
                 r.copied = r.copied + 1
             elseif not target and s.kind ~= "clear" then
-                detail("keep current (skipped " .. s.value .. ")")
+                detail("keep current (skipped " .. s.value .. "): " .. (why or "unknown slot type"))
+                r.copiesSkipped = r.copiesSkipped + 1
             elseif target then
                 r.problems[#r.problems + 1] = label .. ": couldn't place the copy of " .. s.value .. "."
             end
@@ -542,7 +553,7 @@ local function applySlots(plan, dry, r)
                     target = { kind = "macro", id = -1 } -- created by Apply
                 end
             elseif s.kind == "item" then
-                target, why = resolveItem(s.value)
+                target, why = resolveItem(s.value, s.slot)
             else
                 why = "unknown slot type " .. tostring(s.kind)
             end
@@ -555,6 +566,7 @@ local function applySlots(plan, dry, r)
             elseif not target then
                 r.skipped[#r.skipped + 1] = label .. ": " .. s.value .. " (" .. why .. ")"
             elseif slotHolds(s.slot, target) then
+                detail("already correct")
                 r.same = r.same + 1
             elseif dry then
                 detail(s.kind .. " " .. s.value)
@@ -572,7 +584,7 @@ function BP.apply(plan, dry, preview)
     local r = {
         placed = 0, same = 0, cleared = 0, macrosNew = 0, macrosChanged = 0, macrosSame = 0,
         bound = 0, bindsSame = 0, notLearned = {}, notInBags = {}, skipped = {}, problems = {},
-        copied = 0, copiedSame = 0, slotDetails = {},
+        copied = 0, copiedSame = 0, copiesSkipped = 0, slotDetails = {},
     }
     if #plan.binds > 0 then
         if not preview then return nil, "Run Check on this plan before Apply." end
@@ -589,27 +601,55 @@ function BP.apply(plan, dry, preview)
     return r
 end
 
-local function reportLines(r, dry, verbose)
-    local lines = {}
+local function countLabel(n, label)
+    return n .. " " .. label .. (n == 1 and "" or "s")
+end
+
+local function reportLines(r, dry)
+    local summary, chat = {}, {}
     local binding = r.binding
+    local errors = binding and binding.errors or {}
+    local warnings = binding and binding.warnings or {}
     if dry then
-        local title = binding and #binding.errors > 0 and "Check BLOCKED" or "Check"
+        local title = #errors > 0 and "Check BLOCKED" or "Check OK"
+        chat[1] = title .. " - " .. countLabel(r.bound, "binding change")
         if binding then
             title = title .. " (" .. (binding.before.set == 1 and "account-wide" or "character-specific")
                 .. ", " .. (binding.legacy and "BP1 exact replacement" or "BP2") .. ")"
         end
-        lines[1] = ("%s - Bindings: %d to change, %d already correct, %d safely preserved.")
+        summary[1] = ("%s - Bindings: %d to change, %d already correct, %d safely preserved.")
             :format(title, r.bound, r.bindsSame, binding and binding.preserved or 0)
-        lines[2] = ("Displaced commands: %d. Orphaned: %d. Blocking errors: %d. Runtime override warnings: %d.")
+        summary[2] = ("Displaced commands: %d. Orphaned: %d. Blocking errors: %d. Runtime override warnings: %d.")
             :format(binding and binding.displaced or 0, binding and binding.orphaned or 0,
-                binding and #binding.errors or 0, binding and binding.overrideWarnings or 0)
-        if r.placed + r.cleared + r.same + r.macrosNew + r.macrosChanged + r.macrosSame > 0 then
-            lines[#lines + 1] = ("Slots: %d to fill, %d to clear, %d already right. Macros: %d new, %d changed, %d unchanged.")
-                :format(r.placed, r.cleared, r.same, r.macrosNew, r.macrosChanged, r.macrosSame)
+                #errors, binding and binding.overrideWarnings or 0)
+        local slots = r.placed + r.cleared + r.copied
+        local skipped = #r.notLearned + #r.notInBags + #r.skipped + r.copiesSkipped
+        if slots + skipped > 0 then
+            local counts = countLabel(slots, "slot change") .. ", " .. skipped .. " skipped"
+            chat[1] = chat[1] .. ", " .. counts
+            summary[#summary + 1] = counts
         end
+        if r.macrosNew + r.macrosChanged > 0 then
+            summary[#summary + 1] = ("Macros: %d new, %d changed."):format(r.macrosNew, r.macrosChanged)
+        end
+        if #errors + #warnings + #r.problems > 0 then
+            chat[1] = chat[1] .. ", " .. countLabel(#errors, "error") .. ", " .. countLabel(#warnings + #r.problems, "warning")
+            local reason = errors[1] or warnings[1] or r.problems[1]
+            if #reason <= 180 then chat[2] = reason end
+        end
+        chat[#chat] = chat[#chat] .. "  Open Details for the full report."
     else
-        lines[1] = ("Done: %d slots filled, %d already right, %d cleared. Macros: %d new, %d changed. Keys: %d set.")
+        summary[1] = ("Done: %d slots filled, %d already right, %d cleared. Macros: %d new, %d changed. Keys changed: %d.")
             :format(r.placed, r.same, r.cleared, r.macrosNew, r.macrosChanged, r.bound)
+    end
+    for _, msg in ipairs(errors) do summary[#summary + 1] = "Blocked: " .. msg end
+    for _, msg in ipairs(warnings) do summary[#summary + 1] = "Warning: " .. msg end
+    for _, msg in ipairs(r.problems) do summary[#summary + 1] = "Warning: " .. msg end
+    local lines = {}
+    for _, msg in ipairs(summary) do lines[#lines + 1] = msg end
+    if dry then
+        lines[#lines + 1] = ("Slots: %d to fill, %d to clear, %d already right. Macros: %d new, %d changed, %d unchanged.")
+            :format(r.placed, r.cleared, r.same, r.macrosNew, r.macrosChanged, r.macrosSame)
     end
     if r.copied + r.copiedSame > 0 then
         local _, class = UnitClass("player")
@@ -619,11 +659,8 @@ local function reportLines(r, dry, verbose)
             :format(table.concat(names, " and "), r.copied, dry and "to change" or "changed", r.copiedSame)
     end
     if binding then
-        for _, msg in ipairs(binding.errors) do lines[#lines + 1] = "|cffff6060" .. msg .. "|r" end
         for _, msg in ipairs(binding.lines) do lines[#lines + 1] = msg end
-        if verbose then
-            for _, msg in ipairs(binding.details) do lines[#lines + 1] = msg end
-        end
+        for _, msg in ipairs(binding.details) do lines[#lines + 1] = msg end
     end
     -- Check already names each skipped slot, its current contents and the reason.
     if not dry and #r.notLearned > 0 then
@@ -636,13 +673,27 @@ local function reportLines(r, dry, verbose)
     if not dry then
         for _, s in ipairs(r.skipped) do lines[#lines + 1] = "Skipped " .. s end
     end
-    for _, p in ipairs(r.problems) do lines[#lines + 1] = "|cffff6060" .. p .. "|r" end
-    return lines
+    return summary, lines, dry and chat or summary
 end
 
 ------------------------------------------------------------------------
 -- Export: turn the current bars and keys into a plan string
 ------------------------------------------------------------------------
+
+local function exportSpell(id, book)
+    local name = getSpellName(id)
+    if name then
+        local target = resolveSpell(name, book)
+        if target and target.id == id then return name end
+        local sub = getSpellSubtext(id)
+        if sub and sub ~= "" then
+            local ranked = name .. "(" .. sub .. ")"
+            target = resolveSpell(ranked, book)
+            if target and target.id == id then return ranked end
+        end
+    end
+    return "spell:" .. id
+end
 
 function BP.exportCurrent()
     local _, class = UnitClass("player")
@@ -659,14 +710,7 @@ function BP.exportCurrent()
             if not copyPage[p.first] and HasAction(slot) then
                 local kind, id = GetActionInfo(slot)
                 if kind == "spell" then
-                    local name = getSpellName(id)
-                    if name then
-                        -- Keep the rank only when it isn't the highest one you know.
-                        local best = resolveSpell(name, book)
-                        local sub = getSpellSubtext(id)
-                        if best and best.id ~= id and sub and sub ~= "" then name = name .. "(" .. sub .. ")" end
-                        plan.slots[#plan.slots + 1] = { slot = slot, kind = "spell", value = name }
-                    end
+                    plan.slots[#plan.slots + 1] = { slot = slot, kind = kind, value = exportSpell(id, book) }
                 elseif kind == "macro" then
                     local name, icon, body = GetMacroInfo(id)
                     if name then
@@ -679,7 +723,10 @@ function BP.exportCurrent()
                         end
                     end
                 elseif kind == "item" then
-                    plan.slots[#plan.slots + 1] = { slot = slot, kind = "item", value = getItemName(id) or ("item:" .. id) }
+                    local name = getItemName(id)
+                    local target = name and resolveItem(name)
+                    local value = target and target.id == id and name or ("item:" .. id)
+                    plan.slots[#plan.slots + 1] = { slot = slot, kind = kind, value = value }
                 end
             end
         end
@@ -699,49 +746,76 @@ end
 local frame
 local SETUP_HELP = "BP2 setup: action slots, macros used on those slots, and supported keybindings. Press Ctrl+C to copy."
 
-local function showStatus(lines)
-    for _, l in ipairs(lines) do say(l) end
+local checked
+local CHECK_HINT = "Run Check before Apply."
+
+local function refreshApply()
     if not frame then return end
-    frame.status:SetText(table.concat(lines, "\n"))
-    frame.reportBody:SetHeight(math.max(1, frame.status:GetStringHeight() + 4))
+    if checked and checked.text == frame.edit:GetText() then
+        frame.apply:Enable()
+        frame.hint:SetText("Checked. Ready to Apply.")
+    else
+        frame.apply:Disable()
+        frame.hint:SetText(CHECK_HINT)
+    end
+end
+
+local function display(details)
+    frame.reportText = table.concat(details and frame.details or frame.summary, "\n")
+    if details then
+        frame.detailsTab:Disable()
+        frame.summaryTab:Enable()
+    else
+        frame.summaryTab:Disable()
+        frame.detailsTab:Enable()
+    end
+    frame.status:ClearFocus()
+    frame.status:SetText(frame.reportText)
+    frame.status:SetCursorPosition(0)
     frame.report:SetVerticalScroll(0)
 end
 
-local checked
-function BP.run(text, dry, verbose)
-    if dry then checked = nil end
-    if InCombatLockdown() then
-        showStatus({ "Can't change bars or keys in combat. Try again after the fight." })
-        return
+local function showStatus(summary, details, chat)
+    for _, msg in ipairs(chat or summary) do say(msg) end
+    if frame then
+        frame.summary, frame.details = summary, details or summary
+        display(false)
+        refreshApply()
     end
+    return summary, details or summary
+end
+
+function BP.run(text, dry)
+    local previous = checked
+    checked = nil
+    refreshApply()
+    local function stop(msg)
+        local title = dry and "Check BLOCKED" or "Apply stopped"
+        return showStatus({ title .. ": " .. msg }, nil, { title .. ": " .. msg .. "  Open Details for the full report." })
+    end
+    if InCombatLockdown() then return stop("Can't change bars or keys in combat. Try again after the fight.") end
+    if not dry and (not previous or previous.text ~= text) then return stop(CHECK_HINT) end
     local plan, err = BP.parse(text)
-    if not plan then
-        showStatus({ err })
-        return
-    end
+    if not plan then return stop(err) end
     local _, myClass = UnitClass("player")
     if plan.class and myClass and plan.class ~= myClass then
-        showStatus({ ("This plan is for a %s and this character is a %s. Switch class in the planner and copy that plan.")
-            :format(plan.class:lower(), myClass:lower()) })
-        return
+        return stop(("This plan is for a %s and this character is a %s. Switch class in the planner and copy that plan.")
+            :format(plan.class:lower(), myClass:lower()))
     end
     local preview
-    if #plan.binds > 0 then
-        if dry then
-            local ok, result = pcall(function() return B.preview(plan, B.capture(plan.binds)) end)
-            if not ok then showStatus({ "Check blocked: " .. tostring(result) }); return end
-            preview = result
-            preview.legacy = plan.version == 1
-        elseif checked and checked.text == trim(text) then
-            preview = checked.preview
-            checked = nil
-        else showStatus({ "Run a successful Check on this exact plan before Apply." }); return end
+    if dry and #plan.binds > 0 then
+        local ok, result = pcall(function() return B.preview(plan, B.capture(plan.binds)) end)
+        if not ok then return stop(tostring(result)) end
+        preview = result
+        preview.legacy = plan.version == 1
+    elseif previous and not dry then
+        preview = previous.preview
     end
     local ok, r, failure = pcall(BP.apply, plan, dry, preview)
-    if not ok or not r then showStatus({ "Stopped: " .. tostring(failure or r) }); return end
-    if dry and preview and #preview.errors == 0 then checked = { text = trim(text), preview = preview } end
+    if not ok or not r then return stop(tostring(failure or r)) end
+    if dry and (not preview or #preview.errors == 0) then checked = { text = text, preview = preview } end
     if not dry then BarsmithDB.last = trim(text) end
-    showStatus(reportLines(r, dry, verbose))
+    return showStatus(reportLines(r, dry))
 end
 
 local function buildFrame()
@@ -765,11 +839,11 @@ local function buildFrame()
     help:SetPoint("TOPLEFT", 16, -34)
     help:SetPoint("TOPRIGHT", -16, -34)
     help:SetJustifyH("LEFT")
-    help:SetText("Paste a plan and click Check. Shift-click Check for all binding details. Apply makes the changes.")
+    help:SetText("Paste a setup plan and click Check. Review the summary before applying changes.")
 
     local scroll = CreateFrame("ScrollFrame", "BarsmithScroll", f, "UIPanelScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", 18, -56)
-    scroll:SetPoint("BOTTOMRIGHT", -38, 150)
+    scroll:SetPoint("BOTTOMRIGHT", -38, 245)
 
     local bg = f:CreateTexture(nil, "BACKGROUND", nil, 1)
     bg:SetPoint("TOPLEFT", scroll, -4, 4)
@@ -790,36 +864,62 @@ local function buildFrame()
     f.edit = edit
 
     local report = CreateFrame("ScrollFrame", "BarsmithReport", f, "UIPanelScrollFrameTemplate")
-    report:SetPoint("TOPLEFT", scroll, "BOTTOMLEFT", 0, -12)
-    report:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -38, 46)
-    local body = CreateFrame("Frame", nil, report)
-    body:SetSize(560, 1)
-    report:SetScrollChild(body)
-    local status = body:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    status:SetPoint("TOPLEFT")
+    report:SetPoint("TOPLEFT", scroll, "BOTTOMLEFT", 0, -44)
+    report:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -38, 50)
+    local status = CreateFrame("EditBox", nil, report)
+    status:SetMultiLine(true)
+    status:SetAutoFocus(false)
+    status:SetFontObject(ChatFontNormal)
     status:SetWidth(558)
-    status:SetJustifyH("LEFT")
-    status:SetJustifyV("TOP")
-    status:SetWordWrap(true)
-    f.reportBody = body
-    f.report = report
-    f.status = status
+    status:SetMaxLetters(0)
+    if status.SetMaxBytes then status:SetMaxBytes(0) end
+    status:SetScript("OnEscapePressed", status.ClearFocus)
+    status:SetScript("OnTextChanged", function(self, userInput)
+        if userInput then self:SetText(f.reportText); self:HighlightText() end
+    end)
+    report:SetScrollChild(status)
+    f.report, f.status = report, status
+    f.summary, f.details, f.reportText = {}, {}, ""
 
-    local function button(text, x, width, onClick)
+    local function button(text, x, width, onClick, y)
         local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
         b:SetSize(width, 24)
-        b:SetPoint("BOTTOMLEFT", x, 14)
+        b:SetPoint("BOTTOMLEFT", x, y or 14)
         b:SetText(text)
         b:SetScript("OnClick", onClick)
         return b
     end
-    button("Check", 16, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), true, IsShiftKeyDown()) end)
-    button("Apply", 88, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), false) end)
+    f.summaryTab = button("Summary", 16, 82, function() display(false); refreshApply() end, 210)
+    f.detailsTab = button("Details", 102, 72, function() display(true); refreshApply() end, 210)
+    f.summaryTab:Disable()
+    button("Copy report", 178, 106, function()
+        display(true)
+        status:SetFocus()
+        status:HighlightText()
+        f.hint:SetText("Report selected. Press Ctrl+C to copy.")
+    end, 210)
+    f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    f.hint:SetPoint("LEFT", f, "BOTTOMLEFT", 295, 222)
+    button("Check", 16, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), true) end)
+    f.apply = button("Apply", 88, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), false) end)
+    f.apply:Disable()
+    f.hint:SetText(CHECK_HINT)
+    edit:SetScript("OnTextChanged", function()
+        checked = nil
+        f.summary, f.details = {}, {}
+        display(false)
+        refreshApply()
+    end)
+    local function exportHelp(msg)
+        f.summary, f.details = { msg }, { msg }
+        display(false)
+    end
+    f.exportHelp = exportHelp
     button("Export setup", 160, 117, function()
         edit:SetText(BP.exportCurrent())
         edit:SetFocus()
         edit:HighlightText()
-        status:SetText(SETUP_HELP)
+        exportHelp(SETUP_HELP)
     end)
     button("Clear", 281, 55, function() edit:SetText(""); edit:SetFocus() end)
     button("Census", 338, 72, function()
@@ -828,7 +928,7 @@ local function buildFrame()
         edit:SetText(snapshot)
         edit:SetFocus()
         edit:HighlightText()
-        status:SetText("Copy this read-only BC1 census. Load it into the planner with your plan open.")
+        exportHelp("Copy this read-only BC1 census. Load it into the planner with your plan open.")
     end)
 
     local auto = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
@@ -928,7 +1028,7 @@ SlashCmdList.BARSMITH = function(msg)
         openFrame(BP.exportCurrent())
         frame.edit:SetFocus()
         frame.edit:HighlightText()
-        frame.status:SetText(SETUP_HELP)
+        frame.exportHelp(SETUP_HELP)
     elseif frame and frame:IsShown() then
         frame:Hide()
     else

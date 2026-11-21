@@ -115,9 +115,13 @@ function B.key(raw)
 end
 
 function B.preview(plan, s)
-    local p = { before = s, desired = {}, changes = {}, lines = {}, details = {}, errors = {},
+    local p = { before = s, desired = {}, changes = {}, lines = {}, details = {}, warnings = {}, errors = {},
         same = 0, displaced = 0, preserved = 0, orphaned = 0, overrideWarnings = 0 }
     local assigned, touched, allowed, lost = {}, {}, {}, {}
+    local materialOverrides, blockingOverrides = {}, {}
+    local function overrideTarget(key)
+        return s.overrides[key] ~= "" and s.overrides[key] or "unbound"
+    end
     local function problem(msg) p.errors[#p.errors + 1] = msg end
     local function claim(key, command)
         if p.desired[key] ~= nil and p.desired[key] ~= command then
@@ -161,13 +165,15 @@ function B.preview(plan, s)
         else
             p.changes[#p.changes + 1] = { key = k, old = old, new = new }
             if old then
-                touched[old], lost[old] = true, true
+                touched[old] = true
+                lost[old] = lost[old] or {}
+                local destination = new and (" to " .. (s.rows[new].label or new)) or " (removed)"
+                table.insert(lost[old], k .. destination)
                 writable(old)
             end
         end
-        if s.overrides[k] then
-            p.overrideWarnings = p.overrideWarnings + 1
-            p.lines[#p.lines + 1] = "Override on " .. k .. ": " .. s.overrides[k] .. " (runtime layer)"
+        if old ~= new and s.overrides[k] and s.overrides[k] ~= (new or "") then
+            materialOverrides[k] = true
         end
     end
     local taken = {}
@@ -184,35 +190,45 @@ function B.preview(plan, s)
     for cmd in pairs(assigned) do touched[cmd] = true end
     local finalKeys = sorted(final)
     for _, cmd in ipairs(sorted(touched)) do
-        local remaining, preserved, masked, usable = {}, {}, {}, false
+        local remaining, preserved, usable = {}, {}, false
         for _, key in ipairs(finalKeys) do
             if final[key] == cmd then
                 remaining[#remaining + 1] = key
                 if not s.overrides[key] or s.overrides[key] == cmd then
                     usable = true
                     if p.desired[key] == nil then p.preserved = p.preserved + 1 end
-                elseif lost[cmd] and p.desired[key] == nil then
-                    masked[#masked + 1] = key .. " -> " .. s.overrides[key]
+                elseif lost[cmd] then
+                    materialOverrides[key] = true
                 end
                 if p.desired[key] == nil then preserved[#preserved + 1] = key end
             end
         end
-        if #remaining == 0 then
+        if #remaining == 0 and lost[cmd] then
             p.orphaned = p.orphaned + 1
-            local msg = "Orphan: " .. cmd .. " will be unbound."
-            if taken[cmd] and not allowed[cmd] then problem(msg)
-            else p.lines[#p.lines + 1] = msg .. " Explicitly requested." end
+            local msg = (s.rows[cmd].label or cmd) .. " will be unbound: " .. table.concat(lost[cmd], ", ") .. "."
+            if allowed[cmd] then msg = msg .. " Acknowledged by plan." end
+            p.warnings[#p.warnings + 1] = msg
         elseif lost[cmd] then
             p.lines[#p.lines + 1] = cmd .. " remains on " .. table.concat(remaining, ", ")
-            if #masked > 0 then
-                p.lines[#p.lines + 1] = "Runtime overrides on remaining keys: " .. table.concat(masked, ", ")
-                p.overrideWarnings = p.overrideWarnings + 1
-            end
-            if taken[cmd] and not usable and not allowed[cmd] then
-                problem("All remaining keys for " .. cmd .. " have runtime overrides.")
+            if not usable then
+                local masked = {}
+                for _, key in ipairs(remaining) do
+                    blockingOverrides[key] = true
+                    masked[#masked + 1] = key .. " -> " .. overrideTarget(key)
+                end
+                problem("All remaining keys for " .. cmd .. " have runtime overrides. " .. table.concat(masked, ", "))
             end
         end
         if #preserved > 0 then p.details[#p.details + 1] = "Preserved on " .. cmd .. ": " .. table.concat(preserved, ", ") end
+    end
+    for _, key in ipairs(sorted(s.overrides)) do
+        local msg = "Runtime override on " .. key .. ": " .. overrideTarget(key)
+        if materialOverrides[key] and not blockingOverrides[key] then
+            p.overrideWarnings = p.overrideWarnings + 1
+            p.warnings[#p.warnings + 1] = msg
+        elseif not blockingOverrides[key] then
+            p.details[#p.details + 1] = msg
+        end
     end
     p.final = final
     return p

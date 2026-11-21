@@ -15,7 +15,7 @@ Set up your WoW Forever action bars, macros and keybinds in the browser, then lo
 1. Copy this branch's `addon/Barsmith` directory into `Interface/AddOns`, then reload the game. Open this branch's `index.html` in a browser.
 2. In `/barsmith`, **Export setup** copies the current supported slots, macros and bar-planner key assignments into a BP2 plan. Press Ctrl+C and **Load** it on the page. **Census** produces a separate BC1 snapshot. Copy it and **Load** it with that plan open. Both strings can be given to an external planner.
 3. Edit bar buttons as usual. Under **Binding instructions and collision preview**, add or delete individual instructions, including secondary keys and commands from addons. Deleting an instruction leaves that relationship unmanaged. To release a key in game, add a **REMOVE** instruction naming its current owner.
-4. Copy the plan, paste it into `/barsmith` out of combat, and press **Check**. Review the active account/character scope, slot changes and full scrollable binding report. Resolve blocked commands and check again. **Apply** revalidates the checked binding graph before touching any slots, macros or bindings.
+4. Copy the plan, paste it into `/barsmith` out of combat, and press **Check**. Review **Summary** for changes and warnings. Open **Details** for individual keys and slots. **Copy report** selects the full text for Ctrl+C. Apply unlocks after a successful Check and locks again as soon as the plan text changes. **Apply** revalidates the checked binding graph before touching any slots, macros or bindings.
 5. Auto-fill still places learned spells into empty planned slots. `/barsmith apply` reopens the last plan for review and another Apply.
 
 The game client is the authority. The web preview uses the snapshot attached to the current plan. Browser storage on this branch imports earlier saved plans and keeps its own copy.
@@ -41,7 +41,7 @@ Both plan versions use a prefix followed by base64-encoded UTF-8. Each decoded l
 |---|---|---|
 | `BP2:`, `BARPLAN 2` | `ENSURE key command` | Give this key to the command. Preserve the command's other keys. |
 | | `REMOVE key expected-command` | Release only that relationship. An already free key is a no-op. A different owner blocks Apply. Explicit removal of the last key is reported. |
-| | `ALLOWORPHAN command` | Acknowledge a displacement that leaves this particular command without a usable key. Competing instructions still block Apply. |
+| | `ALLOWORPHAN command` | Optional acknowledgment that this command may lose its last key. Existing records still load. |
 | `BP1:`, `BARPLAN 1` | `BIND key command` | For each named command, the listed keys form its exact set. Check lists omitted keys as legacy exact removals. Conflicting claims or unresolved displacements block Apply. |
 
 New plans use BP2. Imported BP1 plans and saved upstream browser plans retain BP1 semantics until **Convert BP1 to preservation-safe BP2** is selected. Conversion changes each BIND to ENSURE. Both versions retain multiple keys for a command. Binding order in the Settings UI is managed by the game. Reapplying a matching plan leaves the current key order alone.
@@ -63,7 +63,7 @@ New binding: CTRL-B -> TOGGLEBACKPACK
 TOGGLEBACKPACK remains on CTRL-B
 ```
 
-Leaving out the CTRL-B assignment produces `Orphan: TOGGLEBACKPACK will be unbound.` and blocks Apply. An already-correct R and a preserved NUMLOCK contribute to the summary counts. Shift-click **Check** for the individual keys. The preserved count covers usable, unmentioned keys on commands involved in the plan.
+Leaving out the CTRL-B assignment produces a warning that Backpack will be unbound as B moves to the action button. You can Apply after reviewing Check. An already-correct R and a preserved NUMLOCK contribute to the summary counts. Open **Details** for the individual keys. The preserved count covers usable, unmentioned keys on commands involved in the plan.
 
 ## Census and API limits
 
@@ -71,7 +71,7 @@ Leaving out the CTRL-B assignment produces `Orphan: TOGGLEBACKPACK will be unbou
 
 The addon visits every `GetNumBindings()` index, requests gamepad keys with `GetBinding(i, true)`, and collects every returned key and every `GetBindingKey` result. This includes registered addon commands and unbound rows. For each planned key, Check queries its current persistent owner and follows that command's keys, even for a dynamically bound `CLICK Frame:Button`. The API exposes no universal iterator for frame-owned overrides or unregistered dynamic command strings. A census can therefore describe the exposed registry in full while a later in-game Check discovers additional owners. A bar addon can also change its overrides after Check.
 
-Management targets ordinary persistent gameplay bindings. Context-specific commands (including gamepad-mode commands) and custom controls appear in the census. Attempts to edit them are blocked. Voice push-to-talk exposes its chord through a separate accessor. A runtime override on a touched key is reported. When all of a displaced command's remaining keys are masked by overrides, Check requires explicit acknowledgment.
+Management targets ordinary persistent gameplay bindings. Context-specific commands (including gamepad-mode commands) and custom controls appear in the census. Attempts to edit them are blocked. Voice push-to-talk exposes its chord through a separate accessor. Details lists detected runtime overrides. Summary warns when an override masks a proposed change or fallback. If every remaining key for a command losing a key is masked, Check blocks Apply until the plan or live state changes.
 
 Factory defaults are unavailable as a complete read-only binding graph in the inspected Forever client. Its Settings reset calls `LoadBindings(Enum.BindingSet.Default)`, which changes the active table. Barsmith never uses that path or infers defaults from unbound commands. A character's current set may be account-wide. Check labels that scope and Apply saves to precisely that active set.
 

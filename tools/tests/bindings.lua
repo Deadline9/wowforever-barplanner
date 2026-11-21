@@ -1,12 +1,13 @@
 -- Run at the repository root with lua or texlua. Exercise the real Check/Apply entry point.
 local owners, registry, overrides, scope, writes, saves, rejected, output, clears, slotEdits
+local summary, details
 local unpack = table.unpack or unpack
 local failures, passed = 0, 0
 local function test(name, fn)
     owners = { R = "RUN", NUMLOCK = "RUN", B = "PACK", ["SHIFT-B"] = "ALLBAGS", F13 = "ADDON" }
     registry = { "RUN", "PACK", "BUTTON", "ALLBAGS", "ADDON", "UNBOUND" }
     overrides, scope, writes, saves, rejected, output, clears, slotEdits = {}, 2, {}, 0, nil, {}, 0, 0
-    BarsmithDB = {}
+    BarsmithDB, summary, details = {}, {}, {}
     local ok, err = pcall(fn)
     if ok then passed = passed + 1 else failures = failures + 1; print(name, err) end
 end
@@ -44,15 +45,16 @@ DEFAULT_CHAT_FRAME = { AddMessage = function(_, line) output[#output+1] = line e
 dofile("addon/Barsmith/Bindings.lua")
 dofile("addon/Barsmith/Barsmith.lua")
 local BP = Barsmith
-local function run(records, version, verbose)
+local function run(records, version)
     version = version or 2
     local text = "BP" .. version .. ":" .. BP.b64encode("BARPLAN\t" .. version .. "\n" .. records)
-    BP.run(text, true, verbose)
+    summary, details = BP.run(text, true)
     assert(#writes == 0 and saves == 0 and clears == 0 and slotEdits == 0, "Check mutated state")
     return function() BP.run(text, false) end
 end
 local function says(msg)
-    assert(table.concat(output, "\n"):find(msg, 1, true), table.concat(output, "\n"))
+    local report = table.concat(details, "\n") .. "\n" .. table.concat(output, "\n")
+    assert(report:find(msg, 1, true), report)
 end
 
 test("1 preserve Autorun", function()
@@ -60,10 +62,10 @@ test("1 preserve Autorun", function()
     says("Bindings: 0 to change, 1 already correct, 1 safely preserved.")
     assert(owners.NUMLOCK == "RUN" and owners.R == "RUN" and #writes == 0)
 end)
-test("2 orphan gates even slot edits", function()
+test("2 orphan warns before intentional changes", function()
     run("SLOT\t1\tclear\t\nENSURE\tB\tBUTTON")()
-    says("Orphan: PACK will be unbound.")
-    assert(owners.B == "PACK" and #writes == 0 and slotEdits == 0 and not BarsmithDB.last)
+    says("Warning: PACK will be unbound: B to BUTTON.")
+    assert(owners.B == "BUTTON" and #writes == 1 and slotEdits == 1 and BarsmithDB.last)
 end)
 test("3 safe displacement", function()
     owners["CTRL-B"] = "PACK"
@@ -109,8 +111,8 @@ test("conflicting intent", function()
 end)
 test("multiple planned displacements orphan together", function()
     run("ENSURE\tR\tBUTTON\nENSURE\tNUMLOCK\tPACK")()
-    says("Orphan: RUN")
-    assert(#writes == 0)
+    says("RUN will be unbound: NUMLOCK to PACK, R to BUTTON.")
+    assert(#writes == 2)
 end)
 test("guard rejects wrong owner", function()
     run("REMOVE\tB\tRUN")()
@@ -139,15 +141,15 @@ test("runtime-masked alternate", function()
     owners.X, overrides.X = "PACK", "CLICK Addon:A"
     run("ENSURE\tB\tBUTTON")()
     says("All remaining keys for PACK have runtime overrides.")
-    says("Runtime override warnings: 1.")
+    says("Runtime override warnings: 0.")
     says("X -> CLICK Addon:A")
     assert(#writes == 0)
 end)
 test("unindexed dynamic owner", function()
     owners.X = "CLICK Frame:LeftButton"
     run("ENSURE\tX\tPACK")()
-    says("Orphan: CLICK Frame:LeftButton")
-    assert(#writes == 0)
+    says("CLICK Frame:LeftButton will be unbound: X to PACK.")
+    assert(#writes == 1)
 end)
 test("census includes available, unbound and extra keys", function()
     owners.F3, overrides.R = "RUN", "CLICK Frame:A"
@@ -165,13 +167,13 @@ test("slot dry run reports skipped stale and cleared actions", function()
     run("SLOT\t4\tspell\tFuture Spell\nSLOT\t5\tclear\t")
     says("spell 100 -> keep current (skipped Future Spell)")
     says("spell 100 -> empty")
-    local _, mentions = table.concat(output):gsub("Future Spell", "")
+    local _, mentions = table.concat(details):gsub("Future Spell", "")
     assert(mentions == 1)
     assert(slotEdits == 0)
 end)
 test("explicit last removal is intentional", function()
     run("REMOVE\tB\tPACK")()
-    says("Orphan: PACK will be unbound. Explicitly requested.")
+    says("PACK will be unbound: B (removed).")
     assert(not owners.B and saves == 1)
 end)
 test("account save uses the active set", function()
@@ -207,22 +209,24 @@ test("census collects sparse varargs and extra contexts", function()
     assert(#writes == 0)
     GetBinding, C_KeyBindings = get, nil
 end)
-test("ordinary Check summarizes all matching keys in two lines", function()
+test("ordinary Check uses one chat line and a count summary", function()
     run("ENSURE\tR\tRUN\nENSURE\tB\tPACK\nENSURE\tF13\tADDON")
-    assert(#output == 2)
+    assert(#output == 1 and output[1]:find("Check OK - 0 binding changes", 1, true))
+    assert(output[1]:find("Open Details", 1, true))
     says("Bindings: 0 to change, 3 already correct, 1 safely preserved.")
     says("Displaced commands: 0. Orphaned: 0. Blocking errors: 0. Runtime override warnings: 0.")
 end)
-test("verbose Check still shows each correct and preserved key", function()
-    run("ENSURE\tR\tRUN", 2, true)
+test("only Details shows each correct and preserved key", function()
+    run("ENSURE\tR\tRUN")
+    assert(not table.concat(summary):find("NUMLOCK") and not table.concat(output):find("NUMLOCK"))
     says("Already correct: R -> RUN")
     says("Preserved on RUN: NUMLOCK")
 end)
 test("orphan summary counts commands once and precedes details", function()
     run("ENSURE\tR\tBUTTON\nENSURE\tNUMLOCK\tBUTTON")
-    assert(output[1]:find("Check BLOCKED", 1, true))
-    assert(output[2]:find("Displaced commands: 1. Orphaned: 1. Blocking errors: 1.", 1, true))
-    says("Orphan: RUN will be unbound.")
+    assert(output[1]:find("Check OK", 1, true))
+    assert(summary[2]:find("Displaced commands: 1. Orphaned: 1. Blocking errors: 0.", 1, true))
+    assert(output[2]:find("RUN will be unbound", 1, true))
     says("Displacement: R from RUN to BUTTON")
 end)
 test("safe displacements, removals and runtime warnings remain visible", function()
@@ -232,10 +236,153 @@ test("safe displacements, removals and runtime warnings remain visible", functio
     says("Bindings: 3 to change, 1 already correct, 2 safely preserved.")
     says("Displaced commands: 1. Orphaned: 0. Blocking errors: 0. Runtime override warnings: 1.")
     says("PACK remains on CTRL-B, X")
-    says("Override on X: CLICK Frame:A")
+    says("Runtime override on X: CLICK Frame:A")
     says("RUN remains on NUMLOCK")
     says("Explicit removal: R from RUN")
     says("New binding: F2 -> BUTTON")
+end)
+test("informational overrides only appear in Details", function()
+    overrides.R, overrides.F13 = "CombatModeSlot1", "CombatModeSlot2"
+    run("ENSURE\tR\tRUN")
+    assert(#output == 1 and not table.concat(output):find("CombatMode"))
+    assert(not table.concat(summary):find("CombatMode"))
+    says("Runtime override warnings: 0.")
+    says("Runtime override on R: CombatModeSlot1")
+    says("Runtime override on F13: CombatModeSlot2")
+end)
+test("override on a changed key warns without blocking", function()
+    overrides.X = "CombatModeSlot3"
+    run("ENSURE\tX\tBUTTON")()
+    assert(table.concat(summary):find("Warning: Runtime override on X: CombatModeSlot3", 1, true))
+    assert(owners.X == "BUTTON")
+end)
+test("acknowledgment cannot bypass an unsafe fallback", function()
+    owners.X, overrides.X = "PACK", "CombatModeSlot3"
+    run("ENSURE\tB\tBUTTON\nALLOWORPHAN\tPACK")()
+    assert(output[1]:find("Check BLOCKED", 1, true))
+    assert(output[2]:find("All remaining keys for PACK have runtime overrides.", 1, true))
+    assert(#writes == 0)
+end)
+test("changing a runtime override after Check invalidates Apply", function()
+    local apply = run("ENSURE\tX\tBUTTON")
+    overrides.R = "CombatModeSlot4"
+    apply()
+    says("Run Check again.")
+    apply()
+    says("Run Check before Apply.")
+    assert(#writes == 0 and not BarsmithDB.last)
+end)
+test("setup export round-trips exact slot IDs", function()
+    local actions = { 301, 302, 303, 304, 305, 306, 307 }
+    local names = { [301] = "Feral Charge (Cat)", [302] = "Find Herbs", [303] = "Talent Surge",
+        [304] = "Heal", [305] = "Heal", [307] = "Focus (Bear)" }
+    local book = { {301, names[301]}, {999, names[303]}, {304, "Heal", "Rank 1"}, {305, "Heal", "Rank 2"},
+        {310, "Focus", "Bear"} }
+    local getAction, hasAction, getClass = GetActionInfo, HasAction, UnitClass
+    UnitName = function() return "Druid" end
+    UnitClass = function() return "Druid", "DRUID" end
+    HasAction = function(slot)
+        return actions[slot] ~= nil or (slot >= 109 and slot < 109 + #actions) or slot == 8 or slot == 116
+    end
+    GetActionInfo = function(slot)
+        if slot == 8 or slot == 116 then return "item", 42 end
+        local id = actions[slot] or actions[slot - 108]
+        if id then return "spell", id end
+    end
+    C_Item = { GetItemNameByID = function() return "Spent item" end,
+        GetItemInfoInstant = function() return 42 end, GetItemCount = function() return 0 end }
+    C_Spell = { GetSpellName = function(id) return names[id] end,
+        GetSpellSubtext = function(id) return id == 304 and "Rank 1" or id == 303 and "Talent" or "" end }
+    IsPlayerSpell = function() return false end
+    GetNumSpellTabs = function() return 1 end
+    GetSpellTabInfo = function() return nil, nil, 0, #book end
+    GetSpellBookItemName = function(i) return book[i][2], book[i][3] end
+    GetSpellBookItemInfo = function(i) return "SPELL", book[i][1] end
+
+    local text = BP.exportCurrent()
+    local expected = {"spell:301", "spell:302", "spell:303", "Heal(Rank 1)", "Heal", "spell:306", "spell:307", "item:42"}
+    local plan = assert(BP.parse(text))
+    assert(#plan.slots == #expected)
+    for _, slot in ipairs(plan.slots) do assert(slot.value == expected[slot.slot], slot.value) end
+    local _, report = BP.run(text, true)
+    local lines = table.concat(report, "\n")
+    assert(lines:find("0 to fill, 0 to clear, 8 already right", 1, true), lines)
+    assert(lines:find("0 to change, 8 already right", 1, true), lines)
+    assert(not lines:find("skipped") and #output == 1)
+    BP.run(text, false)
+    assert(BarsmithDB.last == text and slotEdits == 0)
+
+    -- The very same unknown ID must still skip on a different slot.
+    local _, other = BP.run(BP.serialize({ slots = {{slot = 12, kind = "spell", value = "spell:302"}} }), true)
+    assert(table.concat(other):find("skipped spell:302", 1, true))
+    GetActionInfo, HasAction, UnitClass = getAction, hasAction, getClass
+    UnitName, C_Item, C_Spell, IsPlayerSpell = nil, nil, nil, nil
+    GetNumSpellTabs, GetSpellTabInfo, GetSpellBookItemName, GetSpellBookItemInfo = nil, nil, nil, nil
+end)
+test("real frame gates Apply, switches reports, and invalidates edits immediately", function()
+    local buttons, window = {}
+    local noop = function() end
+    local methods = {}
+    local function widget(kind, name)
+        local w = setmetatable({ kind = kind, scripts = {}, enabled = true, text = "" },
+            { __index = function(_, k) return methods[k] or noop end })
+        if name == "BarsmithFrame" then window = w end
+        return w
+    end
+    methods.CreateFontString, methods.CreateTexture = widget, widget
+    function methods:SetText(value)
+        self.text = value
+        if self.kind == "Button" then buttons[value] = self end
+        if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, false) end
+    end
+    function methods:GetText() return self.text end
+    function methods:SetScript(event, handler) self.scripts[event] = handler end
+    function methods:Enable() self.enabled = true end
+    function methods:Disable() self.enabled = false end
+    function methods:HighlightText() self.selected = self.text end
+    CreateFrame, UISpecialFrames, tinsert = widget, {}, table.insert
+    SlashCmdList.BARSMITH("")
+    local function click(label)
+        local button = buttons[label]
+        assert(button.enabled, label)
+        button.scripts.OnClick(button)
+    end
+    local slotsOnly = BP.serialize({ slots = {{slot = 1, kind = "clear", value = ""}} })
+    window.edit:SetText(slotsOnly)
+    assert(not buttons.Apply.enabled and window.hint.text == "Run Check before Apply.")
+    BP.run(slotsOnly, false)
+    assert(slotEdits == 0)
+    click("Check")
+    assert(buttons.Apply.enabled)
+    window.edit:SetText(slotsOnly .. " ")
+    window.edit:SetText(slotsOnly)
+    assert(not buttons.Apply.enabled)
+    BP.run(slotsOnly, false)
+    assert(slotEdits == 0)
+    click("Check")
+    click("Apply")
+    assert(slotEdits == 1 and not buttons.Apply.enabled)
+    window.edit:SetText(BP.serialize({ binds = {{ key = "B", command = "BUTTON" }} }))
+    click("Check")
+    local warning = "Warning: PACK will be unbound: B to BUTTON."
+    assert(buttons.Apply.enabled and window.status.text:find(warning, 1, true))
+    assert(not window.status.text:find("Displacement:"))
+    click("Details")
+    assert(window.status.text:find(warning, 1, true) and window.status.text:find("Displacement:"))
+    click("Summary")
+    click("Copy report")
+    assert(window.status.selected:find("Displacement:"))
+    window.status.text = "accidental edit"
+    window.status.scripts.OnTextChanged(window.status, true)
+    assert(window.status.text == window.status.selected and window.status.text:find(warning, 1, true))
+    owners.B = "ADDON"
+    click("Apply")
+    assert(not buttons.Apply.enabled and #writes == 0 and window.status.text:find("Run Check again."))
+    window.edit:SetText(BP.serialize({ binds = {{ key = "B", command = "BUTTON" }, { key = "B", command = "RUN" }} }))
+    click("Check")
+    assert(not buttons.Apply.enabled and window.status.text:find("competing instructions"))
+    click("Details")
+    assert(window.status.text:find("competing instructions"))
 end)
 print(passed .. " passed, " .. failures .. " failed")
 assert(failures == 0)
