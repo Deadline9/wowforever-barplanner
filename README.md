@@ -10,6 +10,10 @@ Set up your WoW Forever action bars, macros and keybinds in the browser, then lo
 - Keep as many plans per class as you like. They're saved in your browser; the plan string moves them anywhere else.
 - Works with EllesmereUI, Bartender4, Dominos and ElvUI: they show the game's normal bar slots and pass its keybinds on to their own buttons. Those three number bars by action page, so Bar 2 here is their bar 6, Bar 3 is 5, Bar 4 is 3, Bar 5 is 4 and Bars 6–8 are 13–15 (Dominos: 12–14). Some of them also switch the main bar for Shadowform, Moonkin Form or Prowl where the game doesn't, so the addon copies the right buttons onto those pages too.
 
+## Designing bars and keybindings with an AI assistant
+
+Give your assistant the [AI Action-Bar & Keybinding Design Manual](docs/AI_KEYBINDING_MANUAL.md) and two separate strings from `/barsmith`. **Export setup** (BP2) supplies your action slots, macros, and supported keybindings. **Census** (BC1) supplies a read-only binding snapshot so the assistant can check proposed keys for collisions. After reviewing the layout, paste the proposed BP2 plan into Barsmith and run **Check** before **Apply**.
+
 ## Getting it into the game
 
 1. Copy this branch's `addon/Barsmith` directory into `Interface/AddOns`, then reload the game. Open this branch's `index.html` in a browser.
