@@ -1,13 +1,13 @@
 -- Run at the repository root with lua or texlua. Exercise the real Check/Apply entry point.
 local owners, registry, overrides, scope, writes, saves, rejected, output, clears, slotEdits
-local summary, details
+local summary, full, details
 local unpack = table.unpack or unpack
 local failures, passed = 0, 0
 local function test(name, fn)
     owners = { R = "RUN", NUMLOCK = "RUN", B = "PACK", ["SHIFT-B"] = "ALLBAGS", F13 = "ADDON" }
     registry = { "RUN", "PACK", "BUTTON", "ALLBAGS", "ADDON", "UNBOUND" }
     overrides, scope, writes, saves, rejected, output, clears, slotEdits = {}, 2, {}, 0, nil, {}, 0, 0
-    BarsmithDB, summary, details = {}, {}, {}
+    BarsmithDB, summary, full, details = {}, {}, {}, {}
     local ok, err = pcall(fn)
     if ok then passed = passed + 1 else failures = failures + 1; print(name, err) end
 end
@@ -48,12 +48,12 @@ local BP = Barsmith
 local function run(records, version)
     version = version or 2
     local text = "BP" .. version .. ":" .. BP.b64encode("BARPLAN\t" .. version .. "\n" .. records)
-    summary, details = BP.run(text, true)
+    summary, full, details = BP.run(text, true)
     assert(#writes == 0 and saves == 0 and clears == 0 and slotEdits == 0, "Check mutated state")
     return function() BP.run(text, false) end
 end
 local function says(msg)
-    local report = table.concat(details, "\n") .. "\n" .. table.concat(output, "\n")
+    local report = table.concat(full, "\n") .. "\n" .. table.concat(output, "\n")
     assert(report:find(msg, 1, true), report)
 end
 
@@ -216,9 +216,10 @@ test("ordinary Check uses one chat line and a count summary", function()
     says("Bindings: 0 to change, 3 already correct, 1 safely preserved.")
     says("Displaced commands: 0. Orphaned: 0. Blocking errors: 0. Runtime override warnings: 0.")
 end)
-test("only Details shows each correct and preserved key", function()
+test("only Full diagnostics shows each correct and preserved key", function()
     run("ENSURE\tR\tRUN")
     assert(not table.concat(summary):find("NUMLOCK") and not table.concat(output):find("NUMLOCK"))
+    assert(#details == 1 and details[1] == "No changes or warnings.")
     says("Already correct: R -> RUN")
     says("Preserved on RUN: NUMLOCK")
 end)
@@ -241,12 +242,13 @@ test("safe displacements, removals and runtime warnings remain visible", functio
     says("Explicit removal: R from RUN")
     says("New binding: F2 -> BUTTON")
 end)
-test("informational overrides only appear in Details", function()
+test("informational overrides only appear in Full diagnostics", function()
     overrides.R, overrides.F13 = "CombatModeSlot1", "CombatModeSlot2"
     run("ENSURE\tR\tRUN")
     assert(#output == 1 and not table.concat(output):find("CombatMode"))
     assert(not table.concat(summary):find("CombatMode"))
     says("Runtime override warnings: 0.")
+    assert(not table.concat(details):find("CombatMode"))
     says("Runtime override on R: CombatModeSlot1")
     says("Runtime override on F13: CombatModeSlot2")
 end)
@@ -262,6 +264,20 @@ test("acknowledgment cannot bypass an unsafe fallback", function()
     assert(output[1]:find("Check BLOCKED", 1, true))
     assert(output[2]:find("All remaining keys for PACK have runtime overrides.", 1, true))
     assert(#writes == 0)
+end)
+test("Details keeps changes and safety issues in a mixed report", function()
+    overrides.F2, overrides.F13 = "CombatModeSlot2", "CombatModeSlot13"
+    run("ENSURE\tB\tBUTTON\nENSURE\tF2\tRUN\nENSURE\tF13\tADDON\nREMOVE\tR\tRUN\n"
+        .. "SLOT\t4\tspell\tFuture Spell\nSLOT\t5\tclear\t\nSLOT\t6\tspell\tspell:100")
+    local changes = table.concat(details, "\n")
+    for _, msg in ipairs({"Displacement: B", "PACK will be unbound", "Runtime override on F2",
+        "New binding: F2", "Explicit removal: R", "RUN remains on", "skipped Future Spell", "[5]: spell 100 -> empty"}) do
+        assert(changes:find(msg, 1, true), changes)
+        assert(table.concat(full, "\n"):find(msg, 1, true))
+    end
+    for _, msg in ipairs({"CombatModeSlot13", "Already correct: F13", "[6]: spell 100 -> already correct"}) do
+        assert(not changes:find(msg, 1, true) and table.concat(full, "\n"):find(msg, 1, true))
+    end
 end)
 test("changing a runtime override after Check invalidates Apply", function()
     local apply = run("ENSURE\tX\tBUTTON")
@@ -304,10 +320,13 @@ test("setup export round-trips exact slot IDs", function()
     local plan = assert(BP.parse(text))
     assert(#plan.slots == #expected)
     for _, slot in ipairs(plan.slots) do assert(slot.value == expected[slot.slot], slot.value) end
-    local _, report = BP.run(text, true)
+    local _, report, changes = BP.run(text, true)
+    assert(#changes == 1 and changes[1] == "No changes or warnings.")
     local lines = table.concat(report, "\n")
     assert(lines:find("0 to fill, 0 to clear, 8 already right", 1, true), lines)
     assert(lines:find("0 to change, 8 already right", 1, true), lines)
+    assert(lines:find("[1]: spell 301 -> already correct", 1, true))
+    assert(lines:find("[109, compatibility copy]: spell 301 -> already correct", 1, true))
     assert(not lines:find("skipped") and #output == 1)
     BP.run(text, false)
     assert(BarsmithDB.last == text and slotEdits == 0)
@@ -337,6 +356,8 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     end
     function methods:GetText() return self.text end
     function methods:SetScript(event, handler) self.scripts[event] = handler end
+    function methods:Show() self.visible = true end
+    function methods:Hide() self.visible = false end
     function methods:Enable() self.enabled = true end
     function methods:Disable() self.enabled = false end
     function methods:HighlightText() self.selected = self.text end
@@ -344,7 +365,7 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     SlashCmdList.BARSMITH("")
     local function click(label)
         local button = buttons[label]
-        assert(button.enabled, label)
+        assert(button.enabled and button.visible ~= false, label)
         button.scripts.OnClick(button)
     end
     local slotsOnly = BP.serialize({ slots = {{slot = 1, kind = "clear", value = ""}} })
@@ -362,15 +383,30 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     click("Check")
     click("Apply")
     assert(slotEdits == 1 and not buttons.Apply.enabled)
-    window.edit:SetText(BP.serialize({ binds = {{ key = "B", command = "BUTTON" }} }))
+    window.edit:SetText(BP.serialize({ binds = {{ key = "B", command = "BUTTON" }, { key = "R", command = "RUN" }} }))
     click("Check")
     local warning = "Warning: PACK will be unbound: B to BUTTON."
     assert(buttons.Apply.enabled and window.status.text:find(warning, 1, true))
     assert(not window.status.text:find("Displacement:"))
     click("Details")
     assert(window.status.text:find(warning, 1, true) and window.status.text:find("Displacement:"))
+    local normal = window.status.text
+    assert(not normal:find("Already correct: R"))
+    click("Full diagnostics")
+    local exhaustive = window.status.text
+    assert(exhaustive:find("Already correct: R") and exhaustive:find(warning, 1, true))
+    click("Copy report")
+    assert(window.status.selected == exhaustive)
+    click("Hide diagnostics")
+    assert(window.status.text == normal)
+    click("Full diagnostics")
+    click("Check")
+    assert(not window.diagnosticsButton.visible and buttons.Apply.enabled)
+    click("Details")
+    assert(window.status.text == normal)
     click("Summary")
     click("Copy report")
+    assert(window.status.selected == normal)
     assert(window.status.selected:find("Displacement:"))
     window.status.text = "accidental edit"
     window.status.scripts.OnTextChanged(window.status, true)

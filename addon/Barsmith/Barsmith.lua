@@ -496,19 +496,21 @@ local function applySlots(plan, dry, r)
     local _, class = UnitClass("player")
     for _, s in ipairs(slotsWithCopies(plan, class)) do
         local label = slotLabel(s.slot)
-        local function detail(action)
+        local function detail(action, alreadyCorrect)
             if not dry then return end
             local kind, id = GetActionInfo(s.slot)
             local current = kind and (kind .. " " .. tostring(id)) or "empty"
-            r.slotDetails[#r.slotDetails + 1] = ("%s [%d%s]: %s -> %s"):format(
+            local msg = ("%s [%d%s]: %s -> %s"):format(
                 label, s.slot, s.copy and ", compatibility copy" or "", current, action)
+            r.slotDetails[#r.slotDetails + 1] = msg
+            if not alreadyCorrect then r.slotChanges[#r.slotChanges + 1] = msg end
         end
         -- An installed action can outlive its spellbook entry or inventory item.
         -- Its exact ID proves a no-op only on this slot, never on another slot.
         local kind, id = GetActionInfo(s.slot)
         local exact = (kind == "spell" or kind == "item") and id and s.kind == kind and s.value == kind .. ":" .. id
         if exact then
-            detail("already correct")
+            detail("already correct", true)
             if s.copy then r.copiedSame = r.copiedSame + 1 else r.same = r.same + 1 end
         elseif s.copy then
             -- Copies are counted on their own; anything wrong with them is already reported for the original.
@@ -526,7 +528,7 @@ local function applySlots(plan, dry, r)
                     r.copied = r.copied + 1
                 end
             elseif target and slotHolds(s.slot, target) then
-                detail("already correct")
+                detail("already correct", true)
                 r.copiedSame = r.copiedSame + 1
             elseif target and (dry or placeTarget(s.slot, target)) then
                 detail(s.kind .. " " .. s.value)
@@ -566,7 +568,7 @@ local function applySlots(plan, dry, r)
             elseif not target then
                 r.skipped[#r.skipped + 1] = label .. ": " .. s.value .. " (" .. why .. ")"
             elseif slotHolds(s.slot, target) then
-                detail("already correct")
+                detail("already correct", true)
                 r.same = r.same + 1
             elseif dry then
                 detail(s.kind .. " " .. s.value)
@@ -584,7 +586,7 @@ function BP.apply(plan, dry, preview)
     local r = {
         placed = 0, same = 0, cleared = 0, macrosNew = 0, macrosChanged = 0, macrosSame = 0,
         bound = 0, bindsSame = 0, notLearned = {}, notInBags = {}, skipped = {}, problems = {},
-        copied = 0, copiedSame = 0, copiesSkipped = 0, slotDetails = {},
+        copied = 0, copiedSame = 0, copiesSkipped = 0, slotDetails = {}, slotChanges = {},
     }
     if #plan.binds > 0 then
         if not preview then return nil, "Run Check on this plan before Apply." end
@@ -606,7 +608,11 @@ local function countLabel(n, label)
 end
 
 local function reportLines(r, dry)
-    local summary, chat = {}, {}
+    local summary, chat, details = {}, {}, {}
+    local function highlight(msg)
+        summary[#summary + 1] = msg
+        details[#details + 1] = msg
+    end
     local binding = r.binding
     local errors = binding and binding.errors or {}
     local warnings = binding and binding.warnings or {}
@@ -630,7 +636,7 @@ local function reportLines(r, dry)
             summary[#summary + 1] = counts
         end
         if r.macrosNew + r.macrosChanged > 0 then
-            summary[#summary + 1] = ("Macros: %d new, %d changed."):format(r.macrosNew, r.macrosChanged)
+            highlight(("Macros: %d new, %d changed."):format(r.macrosNew, r.macrosChanged))
         end
         if #errors + #warnings + #r.problems > 0 then
             chat[1] = chat[1] .. ", " .. countLabel(#errors, "error") .. ", " .. countLabel(#warnings + #r.problems, "warning")
@@ -639,41 +645,47 @@ local function reportLines(r, dry)
         end
         chat[#chat] = chat[#chat] .. "  Open Details for the full report."
     else
-        summary[1] = ("Done: %d slots filled, %d already right, %d cleared. Macros: %d new, %d changed. Keys changed: %d.")
-            :format(r.placed, r.same, r.cleared, r.macrosNew, r.macrosChanged, r.bound)
+        highlight(("Done: %d slots filled, %d already right, %d cleared. Macros: %d new, %d changed. Keys changed: %d.")
+            :format(r.placed, r.same, r.cleared, r.macrosNew, r.macrosChanged, r.bound))
     end
-    for _, msg in ipairs(errors) do summary[#summary + 1] = "Blocked: " .. msg end
-    for _, msg in ipairs(warnings) do summary[#summary + 1] = "Warning: " .. msg end
-    for _, msg in ipairs(r.problems) do summary[#summary + 1] = "Warning: " .. msg end
-    local lines = {}
-    for _, msg in ipairs(summary) do lines[#lines + 1] = msg end
+    for _, msg in ipairs(errors) do highlight("Blocked: " .. msg) end
+    for _, msg in ipairs(warnings) do highlight("Warning: " .. msg) end
+    for _, msg in ipairs(r.problems) do highlight("Warning: " .. msg) end
+    local full = {}
+    local function change(msg)
+        full[#full + 1] = msg
+        details[#details + 1] = msg
+    end
+    for _, msg in ipairs(summary) do full[#full + 1] = msg end
     if dry then
-        lines[#lines + 1] = ("Slots: %d to fill, %d to clear, %d already right. Macros: %d new, %d changed, %d unchanged.")
+        full[#full + 1] = ("Slots: %d to fill, %d to clear, %d already right. Macros: %d new, %d changed, %d unchanged.")
             :format(r.placed, r.cleared, r.same, r.macrosNew, r.macrosChanged, r.macrosSame)
     end
     if r.copied + r.copiedSame > 0 then
         local _, class = UnitClass("player")
         local names = {}
         for _, c in ipairs(copyPagesFor(class)) do names[#names + 1] = c.label end
-        lines[#lines + 1] = ("Copies for bar addons that switch the main bar in %s: %d %s, %d already right.")
+        full[#full + 1] = ("Copies for bar addons that switch the main bar in %s: %d %s, %d already right.")
             :format(table.concat(names, " and "), r.copied, dry and "to change" or "changed", r.copiedSame)
     end
     if binding then
-        for _, msg in ipairs(binding.lines) do lines[#lines + 1] = msg end
-        for _, msg in ipairs(binding.details) do lines[#lines + 1] = msg end
+        for _, msg in ipairs(binding.lines) do change(msg) end
+        for _, msg in ipairs(binding.details) do full[#full + 1] = msg end
     end
     -- Check already names each skipped slot, its current contents and the reason.
     if not dry and #r.notLearned > 0 then
-        lines[#lines + 1] = ("Not learned yet (or misspelled), skipped (%d): %s"):format(#r.notLearned, table.concat(r.notLearned, ", "))
+        change(("Not learned yet (or misspelled), skipped (%d): %s"):format(#r.notLearned, table.concat(r.notLearned, ", ")))
     end
     if not dry and #r.notInBags > 0 then
-        lines[#lines + 1] = ("Not in your bags, skipped (%d): %s"):format(#r.notInBags, table.concat(r.notInBags, ", "))
+        change(("Not in your bags, skipped (%d): %s"):format(#r.notInBags, table.concat(r.notInBags, ", ")))
     end
-    for _, s in ipairs(r.slotDetails) do lines[#lines + 1] = s end
+    for _, s in ipairs(r.slotChanges) do details[#details + 1] = s end
+    for _, s in ipairs(r.slotDetails) do full[#full + 1] = s end
     if not dry then
-        for _, s in ipairs(r.skipped) do lines[#lines + 1] = "Skipped " .. s end
+        for _, s in ipairs(r.skipped) do change("Skipped " .. s) end
     end
-    return summary, lines, dry and chat or summary
+    if #details == 0 then details[1] = "No changes or warnings." end
+    return summary, full, dry and chat or summary, details
 end
 
 ------------------------------------------------------------------------
@@ -760,14 +772,18 @@ local function refreshApply()
     end
 end
 
-local function display(details)
-    frame.reportText = table.concat(details and frame.details or frame.summary, "\n")
-    if details then
-        frame.detailsTab:Disable()
-        frame.summaryTab:Enable()
-    else
+local function display(view)
+    frame.view = view
+    frame.reportText = table.concat(frame[view], "\n")
+    if view == "summary" then
         frame.summaryTab:Disable()
         frame.detailsTab:Enable()
+        frame.diagnosticsButton:Hide()
+    else
+        frame.summaryTab:Enable()
+        frame.detailsTab:Disable()
+        frame.diagnosticsButton:SetText(view == "full" and "Hide diagnostics" or "Full diagnostics")
+        frame.diagnosticsButton:Show()
     end
     frame.status:ClearFocus()
     frame.status:SetText(frame.reportText)
@@ -775,14 +791,14 @@ local function display(details)
     frame.report:SetVerticalScroll(0)
 end
 
-local function showStatus(summary, details, chat)
+local function showStatus(summary, full, chat, details)
     for _, msg in ipairs(chat or summary) do say(msg) end
     if frame then
-        frame.summary, frame.details = summary, details or summary
-        display(false)
+        frame.summary, frame.full, frame.details = summary, full or summary, details or summary
+        display("summary")
         refreshApply()
     end
-    return summary, details or summary
+    return summary, full or summary, details or summary
 end
 
 function BP.run(text, dry)
@@ -879,7 +895,7 @@ local function buildFrame()
     end)
     report:SetScrollChild(status)
     f.report, f.status = report, status
-    f.summary, f.details, f.reportText = {}, {}, ""
+    f.summary, f.details, f.full, f.reportText = {}, {}, {}, ""
 
     local function button(text, x, width, onClick, y)
         local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -889,30 +905,35 @@ local function buildFrame()
         b:SetScript("OnClick", onClick)
         return b
     end
-    f.summaryTab = button("Summary", 16, 82, function() display(false); refreshApply() end, 210)
-    f.detailsTab = button("Details", 102, 72, function() display(true); refreshApply() end, 210)
+    f.summaryTab = button("Summary", 16, 82, function() display("summary"); refreshApply() end, 210)
+    f.detailsTab = button("Details", 102, 72, function() display("details"); refreshApply() end, 210)
     f.summaryTab:Disable()
+    f.diagnosticsButton = button("Full diagnostics", 288, 124, function()
+        display(f.view == "full" and "details" or "full")
+        refreshApply()
+    end, 210)
+    f.diagnosticsButton:Hide()
     button("Copy report", 178, 106, function()
-        display(true)
+        display(f.view == "full" and "full" or "details")
         status:SetFocus()
         status:HighlightText()
-        f.hint:SetText("Report selected. Press Ctrl+C to copy.")
+        f.hint:SetText("Press Ctrl+C to copy.")
     end, 210)
     f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    f.hint:SetPoint("LEFT", f, "BOTTOMLEFT", 295, 222)
+    f.hint:SetPoint("LEFT", f, "BOTTOMLEFT", 418, 222)
     button("Check", 16, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), true) end)
     f.apply = button("Apply", 88, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), false) end)
     f.apply:Disable()
     f.hint:SetText(CHECK_HINT)
     edit:SetScript("OnTextChanged", function()
         checked = nil
-        f.summary, f.details = {}, {}
-        display(false)
+        f.summary, f.details, f.full = {}, {}, {}
+        display("summary")
         refreshApply()
     end)
     local function exportHelp(msg)
-        f.summary, f.details = { msg }, { msg }
-        display(false)
+        f.summary, f.details, f.full = { msg }, { msg }, { msg }
+        display("summary")
     end
     f.exportHelp = exportHelp
     button("Export setup", 160, 117, function()
