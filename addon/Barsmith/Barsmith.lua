@@ -282,14 +282,6 @@ local function getSpellSubtext(id)
     if GetSpellSubtext then return GetSpellSubtext(id) end
 end
 
-local function getSpellIDByName(name)
-    if C_Spell and C_Spell.GetSpellInfo then
-        local info = C_Spell.GetSpellInfo(name)
-        if info then return info.spellID end
-    end
-    if GetSpellInfo then return (select(7, GetSpellInfo(name))) end
-end
-
 local function pickupSpellID(id)
     if C_Spell and C_Spell.PickupSpell then C_Spell.PickupSpell(id)
     elseif PickupSpell then PickupSpell(id) end
@@ -297,6 +289,38 @@ end
 
 local function isKnownSpell(id)
     return (IsPlayerSpell and IsPlayerSpell(id)) or (IsSpellKnown and IsSpellKnown(id)) or false
+end
+
+-- A name lookup can see spells outside the enumerated skill lines. Confirm the
+-- returned ID belongs to this player before using it as a pickup target.
+local function learnedSpellIDByName(name, rank)
+    local function matches(id)
+        if not id or id <= 0 then return false end
+        local passive = (C_Spell and C_Spell.IsSpellPassive) or IsPassiveSpell
+        if passive and passive(id) then return false end
+        if rank then
+            -- A parenthesis can be part of the actual name or an explicit rank.
+            -- Reject an API result that supplies a different subtext.
+            local sub = getSpellSubtext(id)
+            if sub and sub:lower() ~= rank and (getSpellName(id) or ""):lower() ~= name:lower() then return false end
+        end
+        return isKnownSpell(id)
+            or (C_SpellBook and C_SpellBook.IsSpellKnownOrInSpellBook and C_SpellBook.IsSpellKnownOrInSpellBook(id))
+            or (C_SpellBook and C_SpellBook.IsSpellKnown and C_SpellBook.IsSpellKnown(id))
+            or (IsSpellKnownOrOverridesKnown and IsSpellKnownOrOverridesKnown(id))
+    end
+    if C_Spell and C_Spell.GetSpellIDForSpellIdentifier then
+        local id = C_Spell.GetSpellIDForSpellIdentifier(name)
+        if matches(id) then return id end
+    end
+    if C_Spell and C_Spell.GetSpellInfo then
+        local info = C_Spell.GetSpellInfo(name)
+        if info and matches(info.spellID) then return info.spellID end
+    end
+    if GetSpellInfo then
+        local id = select(7, GetSpellInfo(name))
+        if matches(id) then return id end
+    end
 end
 
 local function getItemName(id)
@@ -390,11 +414,17 @@ local function resolveSpell(value, book)
     if found then
         return { kind = "spell", id = found.spellID, pickup = function() pickupBookEntry(found) end }
     end
+    -- Preserve the book's rank selection above. On a miss, ask the client for
+    -- the learned form/override by name, keeping any rank or form qualifier.
+    id = learnedSpellIDByName(value, rank)
+    if not id and rank then
+        local qualified = value:gsub("%s+%(([^()]*)%)$", "(%1)")
+        if qualified ~= value then id = learnedSpellIDByName(qualified, rank) end
+    end
+    if id then
+        return { kind = "spell", id = id, pickup = function() pickupSpellID(id) end }
+    end
     if rank then
-        local rid = getSpellIDByName(value)
-        if rid and isKnownSpell(rid) then
-            return { kind = "spell", id = rid, pickup = function() pickupSpellID(rid) end }
-        end
         return nil, "that rank isn't in your spellbook (turn on Show All Spell Ranks)"
     end
     return nil, "not learned yet"

@@ -288,6 +288,57 @@ test("changing a runtime override after Check invalidates Apply", function()
     says("Run Check before Apply.")
     assert(#writes == 0 and not BarsmithDB.last)
 end)
+for version = 1, 2 do
+    test("BP" .. version .. " places learned names missing from the book and keeps explicit ranks", function()
+        -- Both book APIs enumerate zero entries. The modern name lookup returns
+        -- the learned override, while generic GetSpellInfo can return its base.
+        local ids = { ["Find Herbs"] = 701, ["Feral Charge"] = 702, ["Feral Charge(Cat)"] = 702,
+            ["Heal(Rank 1)"] = 703, ["Heal(Rank 9)"] = 703, ["Future Spell"] = 704, ["Passive Talent"] = 705 }
+        local learned = { [701] = true, [702] = true, [703] = true, [705] = true }
+        local slots, pickups, cursor = {}, {}, nil
+        local getAction, hasAction, clear = GetActionInfo, HasAction, ClearCursor
+        local function pickup(id) pickups[#pickups + 1] = id; cursor = id end
+        local function sub(id) return id == 702 and "Cat" or id == 703 and "Rank 1" or "" end
+        if version == 1 then
+            GetSpellInfo = function(name)
+                if type(name) == "number" then return name == 703 and "Heal" or "Feral Charge" end
+                return name, nil, nil, nil, nil, nil, ids[name]
+            end
+            GetSpellSubtext, PickupSpell = sub, pickup
+            IsSpellKnown = function(id) return learned[id] end
+            IsPassiveSpell = function(id) return id == 705 end
+        else
+            C_Spell = {
+                GetSpellIDForSpellIdentifier = function(name)
+                    if name ~= "Find Herbs" then return ids[name] end
+                end,
+                GetSpellInfo = function(name)
+                    return { spellID = name == "Feral Charge" and 900 or ids[name] }
+                end,
+                GetSpellSubtext = sub, PickupSpell = pickup,
+                IsSpellPassive = function(id) return id == 705 end,
+            }
+            C_SpellBook = { IsSpellKnownOrInSpellBook = function(id) return learned[id] end }
+        end
+        ClearCursor = function() cursor = nil end
+        GetCursorInfo = function() if cursor then return "spell", cursor end end
+        PlaceAction = function(slot) slots[slot] = assert(cursor) end
+        HasAction = function(slot) return slots[slot] ~= nil end
+        GetActionInfo = function(slot) if slots[slot] then return "spell", slots[slot] end end
+        local apply = run("SLOT\t1\tspell\tFind Herbs\nSLOT\t2\tspell\tFeral Charge\n"
+            .. "SLOT\t3\tspell\tFeral Charge (Cat)\nSLOT\t4\tspell\tHeal(Rank 1)\n"
+            .. "SLOT\t5\tspell\tFuture Spell\nSLOT\t6\tspell\tHeal(Rank 9)\nSLOT\t7\tspell\tPassive Talent", version)
+        assert(#pickups == 0)
+        apply()
+        GetActionInfo, HasAction, ClearCursor = getAction, hasAction, clear
+        GetCursorInfo, PlaceAction, PickupSpell, IsPassiveSpell, IsSpellKnown = nil, nil, nil, nil, nil
+        GetSpellInfo, GetSpellSubtext, C_SpellBook, C_Spell = nil, nil, nil, nil
+        says("4 slot changes, 3 skipped")
+        assert(#pickups == 4 and slots[1] == 701 and slots[2] == 702 and slots[3] == 702 and slots[4] == 703)
+        assert(not slots[5] and not slots[6] and not slots[7])
+        assert(BP.parse(BarsmithDB.last).slots[1].value == "Find Herbs")
+    end)
+end
 test("setup export round-trips exact slot IDs", function()
     local actions = { 301, 302, 303, 304, 305, 306, 307 }
     local names = { [301] = "Feral Charge (Cat)", [302] = "Find Herbs", [303] = "Talent Surge",
