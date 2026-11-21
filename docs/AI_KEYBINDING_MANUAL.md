@@ -634,6 +634,33 @@ rather than:
 
 WoW keybinding guidance similarly recommends maintaining consistent functions across characters where practical.
 
+## Multiple Characters and Binding Scope
+
+Barsmith layouts can be character-specific, but WoW's underlying keybinding set may be **account-wide** or **character-specific**. The Binding Census records the active binding context, and Check/Apply operate on that active set. Never assume a binding change is isolated to the current character merely because the action-bar contents are character-specific.
+
+For a player setting up multiple characters, prefer a layered model:
+
+1. Establish a clean **account-wide baseline** first. It should contain universal controls the player wants everywhere and a reusable physical **key -> action-button command** geometry for a reasonable number of useful bar positions.
+2. Keep the baseline class-agnostic. Do not put class-specific spells, Druid forms, Warrior stances, Hunter/Warlock pet controls, healer-only controls, or one-character macros into the generic account layer merely because they are available.
+3. Do not bind every possible action-bar slot account-wide just because it exists. Standardize useful physical locations, not the entire binding namespace.
+4. Before class-specific optimization, enable **character-specific bindings** for that character. WoW copies the current account bindings into the character binding set when character-specific bindings are selected.
+5. After switching binding scope, obtain a **fresh Export setup and fresh Binding Census** from that character. The pre-switch census is no longer sufficient as the design authority.
+6. Customize that inherited character profile for the class/spec. Once character-specific bindings are active, class-specific deviations can be made without intentionally rewriting the account-wide baseline.
+7. Treat the resulting character binding profile as a fork of the baseline. Later account-wide changes must not be assumed to propagate automatically into an existing character-specific profile.
+8. Give every additional character its own Export setup + Binding Census and its own design pass. Other characters may provide ergonomic and muscle-memory references, but they are never binding-state authority for the current character.
+
+The important distinction is between **binding geometry** and **ability placement**.
+
+For example, an account baseline might establish:
+
+`Q -> ACTIONBUTTON6`
+
+A Druid can then place Rejuvenation in that character's corresponding slot while a Priest places Power Word: Shield there. The physical vocabulary remains consistent without forcing the two classes to use the same spells or even the same semantic role when their mechanics justify something different.
+
+If a particular character needs a different physical key-to-command mapping, make that deviation only after character-specific bindings are active and the current scope has been verified through the Census/Check workflow.
+
+Pet classes do not require a separate account baseline. A Hunter or Warlock can inherit the same generic baseline as every other character; add pet-specific bindings only in that character's design layer unless the player deliberately wants a pet command to be universal.
+
 ---
 
 # 15. Forms, Stances, Stealth, and Other State-Specific Bars
@@ -1487,6 +1514,10 @@ The following must remain true throughout the process.
 
 16. **Apply is never recommended after an unsuccessful or stale Check.**
 
+17. **On multi-character accounts, confirm whether the active binding set is account-wide or character-specific before making class-specific binding changes.**
+
+18. **After changing binding scope, obtain a fresh Export setup + Binding Census before redesigning or generating a plan.**
+
 ---
 
 # 41. Recommended AI Workflow
@@ -1499,8 +1530,11 @@ Obtain:
 
 - current Export setup
 - current Binding Census
+- current binding scope when multiple characters are involved: account-wide or character-specific
 
-If either is missing, do not finalize binding assignments.
+If either Export setup or Binding Census is missing, do not finalize binding assignments.
+
+For a new multi-character setup, establish the reusable account-wide baseline first, switch the character to character-specific bindings, and then obtain a **fresh** Export setup + Binding Census before doing that character's class-specific design.
 
 ### Phase 2: Understand the player
 
