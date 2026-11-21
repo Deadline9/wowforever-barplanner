@@ -2,7 +2,7 @@
 
 Set up your WoW Forever action bars, macros and keybinds in the browser, then load them into the game with one string.
 
-**Page:** https://rubensayshi.github.io/wowforever-barplanner/
+**Binding-safety development branch.** Open this checkout's `index.html` and install its `addon/Barsmith` directory to review BP2. The public [upstream planner](https://rubensayshi.github.io/wowforever-barplanner/) and its downloadable addon use BP1.
 
 - An in-game-looking screen: main bar with bars 2, 3 and 6–8 stacked on top, bars 4 and 5 on the right edge, stance bar and pet bar above.
 - Pick a class and race (only the combos Forever allows), then drag spells from that class's Forever spellbook: trainer spells, active talents and racials, with spells new in Forever marked ★. A level slider greys out spells you won't have yet.
@@ -12,12 +12,13 @@ Set up your WoW Forever action bars, macros and keybinds in the browser, then lo
 
 ## Getting it into the game
 
-1. Download [Barsmith.zip](https://rubensayshi.github.io/wowforever-barplanner/Barsmith.zip) and unzip it into `Interface/AddOns`, so you get `Interface/AddOns/Barsmith`. It shows up in the addon list as Barsmith Importer. If you have the old `BarPlan` folder from this page, delete it: the addon was renamed, and a different addon on CurseForge is also called BarPlan.
-2. Copy the plan string from the page.
-3. In game, out of combat: `/barsmith`, paste, **Check**, **Apply**. This creates the macros, fills the buttons and saves the keybinds. Spells you haven't learned yet are skipped and go onto their button when you learn them.
-4. **Export my bars** in `/barsmith` gives you a string to load back into the page.
+1. Copy this branch's `addon/Barsmith` directory into `Interface/AddOns`, then reload the game. Open this branch's `index.html` in a browser.
+2. In `/barsmith`, **Export my bars** copies the current supported slots, macros and bar-planner key assignments into a BP2 plan. Press Ctrl+C and **Load** it on the page. **Census** produces a separate BC1 snapshot. Copy it and **Load** it with that plan open. Both strings can be given to an external planner.
+3. Edit bar buttons as usual. Under **Binding instructions and collision preview**, add or delete individual instructions, including secondary keys and commands from addons. Deleting an instruction leaves that relationship unmanaged. To release a key in game, add a **REMOVE** instruction naming its current owner.
+4. Copy the plan, paste it into `/barsmith` out of combat, and press **Check**. Review the active account/character scope, slot changes and full scrollable binding report. Resolve blocked commands and check again. **Apply** revalidates the checked binding graph before touching any slots, macros or bindings.
+5. Auto-fill still places learned spells into empty planned slots. `/barsmith apply` reopens the last plan for review and another Apply.
 
-The addon refuses a plan made for a different class. It has been tried on WoW Classic, where it worked, but not yet on the Forever client.
+The game client is the authority. The web preview uses the snapshot attached to the current plan. Browser storage on this branch imports earlier saved plans and keeps its own copy.
 
 ## Files
 
@@ -32,22 +33,79 @@ The addon refuses a plan made for a different class. It has been tried on WoW Cl
 | [LICENSE](LICENSE) | MIT license for the code. Ships in both addon zips. |
 | [.github/workflows/release.yml](.github/workflows/release.yml), [.pkgmeta](.pkgmeta) | Packages the addon and uploads it to CurseForge and GitHub Releases when a `v*` tag is pushed. |
 
-## Plan string
+## Binding plans and compatibility
 
-`BP1:` followed by base64 of UTF-8 text. One record per line, fields separated by tabs (`\\`, `\t` and `\n` escaped):
+Both plan versions use a prefix followed by base64-encoded UTF-8. Each decoded line contains tab-separated fields. The original escaping for backslash, tab and newline also applies to BP2 binding fields. SLOT, MACRO, CLASS, NAME and RACE retain their existing syntax. Spells accept names, ranks or `spell:ID`. Items accept names or `item:ID`.
 
+| Prefix and header | Binding records | Behavior |
+|---|---|---|
+| `BP2:`, `BARPLAN 2` | `ENSURE key command` | Give this key to the command. Preserve the command's other keys. |
+| | `REMOVE key expected-command` | Release only that relationship. An already free key is a no-op. A different owner blocks Apply. Explicit removal of the last key is reported. |
+| | `ALLOWORPHAN command` | Acknowledge a displacement that leaves this particular command without a usable key. Competing instructions still block Apply. |
+| `BP1:`, `BARPLAN 1` | `BIND key command` | For each named command, the listed keys form its exact set. Check lists omitted keys as legacy exact removals. Conflicting claims or unresolved displacements block Apply. |
+
+New plans use BP2. Imported BP1 plans and saved upstream browser plans retain BP1 semantics until **Convert BP1 to preservation-safe BP2** is selected. Conversion changes each BIND to ENSURE. Both versions retain multiple keys for a command. Binding order in the Settings UI is managed by the game. Reapplying a matching plan leaves the current key order alone.
+
+Example decoded BP2 plan, with literal tabs:
+
+```text
+BARPLAN	2
+ENSURE	R	TOGGLEAUTORUN
+ENSURE	B	ACTIONBUTTON4
+ENSURE	CTRL-B	TOGGLEBACKPACK
 ```
-BARPLAN 1
-CLASS   SHAMAN
-RACE    Dwarf
-MACRO   name  icon  perChar  body
-SLOT    slot  spell|macro|item|clear  value
-BIND    key   command
+
+If B is Backpack's only key, Check reports the following for the last two assignments:
+
+```text
+Displacement: B from TOGGLEBACKPACK to ACTIONBUTTON4
+New binding: CTRL-B -> TOGGLEBACKPACK
+TOGGLEBACKPACK remains on CTRL-B
 ```
 
-Spells are names, optionally with a rank (`Healing Wave(Rank 1)`), or `spell:ID`. Items are names or `item:ID`.
+Leaving out the CTRL-B assignment produces `Orphan: TOGGLEBACKPACK will be unbound.` and blocks Apply. An already-correct R produces a separate preservation line for NUMLOCK if present.
+
+## Census and API limits
+
+**BC1** is a read-only snapshot. Its decoded header is `BINDCENSUS<TAB>1<TAB>set` (1 account, 2 character). Each `CMD` record contains context number, command identifier, localized category when available, display label, control type (`binding` or `custom`), and zero or more keys in API order. Zero keys on an ordinary command means currently unbound. An `OVERRIDE key action` row records a detectable runtime difference on a known key. The planner stores census data separately from executable plan instructions.
+
+The addon visits every `GetNumBindings()` index, requests gamepad keys with `GetBinding(i, true)`, and collects every returned key and every `GetBindingKey` result. This includes registered addon commands and unbound rows. For each planned key, Check queries its current persistent owner and follows that command's keys, even for a dynamically bound `CLICK Frame:Button`. The API exposes no universal iterator for frame-owned overrides or unregistered dynamic command strings. A census can therefore describe the exposed registry in full while a later in-game Check discovers additional owners. A bar addon can also change its overrides after Check.
+
+Management targets ordinary persistent gameplay bindings. Context-specific commands (including gamepad-mode commands) and custom controls appear in the census. Attempts to edit them are blocked. Voice push-to-talk exposes its chord through a separate accessor. A runtime override on a touched key is reported. When all of a displaced command's remaining keys are masked by overrides, Check requires explicit acknowledgment.
+
+Factory defaults are unavailable as a complete read-only binding graph in the inspected Forever client. Its Settings reset calls `LoadBindings(Enum.BindingSet.Default)`, which changes the active table. Barsmith never uses that path or infers defaults from unbound commands. A character's current set may be account-wide. Check labels that scope and Apply saves to precisely that active set.
+
+The capture, simulation and guarded writes live in [Bindings.lua](addon/Barsmith/Bindings.lua). Apply rechecks live ownership, the profile and detected overrides, performs only the reviewed differences, verifies the resulting graph and saves once. A write or save failure triggers best-effort restoration of attempted keys, with a recovery failure reported explicitly. A no-op performs no binding write or save. The transaction covers bindings. Slot placement and macro operations retain their existing per-operation error handling. Successful persistence across a client restart requires an in-game test.
+
+## Verification and upstream sync
+
+From the repository root, run the addon suite with `lua tools/tests/bindings.lua` or `texlua tools/tests/bindings.lua`. The planner suite runs with Node and jsdom 26. The optional HTML argument exercises the original upstream example and browser-storage migration.
+
+```sh
+git show 3163d36:index.html > /tmp/barsmith-upstream.html
+npm install --prefix /tmp/barsmith-test jsdom@26
+NODE_PATH=/tmp/barsmith-test/node_modules node tools/tests/planner.cjs /tmp/barsmith-upstream.html
+```
+
+One-time setup for a new clone of the fork:
+
+```sh
+git remote add upstream https://github.com/rubensayshi/wowforever-barplanner.git
+```
+
+To bring later upstream changes into the development branch:
+
+```sh
+git switch binding-safety
+git fetch upstream
+git merge upstream/main
+```
+
+After reviewing the merge and rerunning the tests, `git push origin binding-safety` updates the review branch.
 
 ## Sources
+
+Binding behavior was checked against the [Forever 1.60.1 UI source, build 71037](https://github.com/Gethe/wow-ui-source/tree/734f065329cff4992835b01a84f210a297db91b6/Interface/AddOns). Relevant files are `Blizzard_SettingsDefinitions_Frame/Keybindings.lua` for enumeration, `Blizzard_Settings_Shared/Blizzard_Keybindings.lua` for contexts, saving and reset, `Blizzard_APIDocumentationGenerated/KeyBindingsDocumentation.lua` for the C namespace, and `Blizzard_FrameXML/CustomBindingManager.lua` for separately managed controls. See also [GetBinding](https://warcraft.wiki.gg/wiki/API:GetBinding), [GetBindingKey](https://warcraft.wiki.gg/wiki/API:GetBindingKey) and [GetBindingAction](https://warcraft.wiki.gg/wiki/API:GetBindingAction).
 
 Read 2026-11-01.
 
