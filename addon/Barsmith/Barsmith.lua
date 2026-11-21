@@ -546,7 +546,7 @@ local function applySlots(plan, dry, r)
             else
                 why = "unknown slot type " .. tostring(s.kind)
             end
-            if not target then detail("keep current (skipped " .. s.value .. ")") end
+            if not target then detail("keep current (skipped " .. s.value .. "): " .. tostring(why)) end
             if not target and why == "not learned yet" then
                 r.notLearned[#r.notLearned + 1] = s.value
             elseif not target and why == "not in bags" then
@@ -589,22 +589,27 @@ function BP.apply(plan, dry, preview)
     return r
 end
 
-local function reportLines(r, dry)
+local function reportLines(r, dry, verbose)
     local lines = {}
+    local binding = r.binding
     if dry then
-        lines[1] = ("Check: %d slots to fill, %d already right, %d to clear. Macros: %d new, %d changed, %d unchanged. Keys: %d to set, %d already set.")
-            :format(r.placed, r.same, r.cleared, r.macrosNew, r.macrosChanged, r.macrosSame, r.bound, r.bindsSame)
+        local title = binding and #binding.errors > 0 and "Check BLOCKED" or "Check"
+        if binding then
+            title = title .. " (" .. (binding.before.set == 1 and "account-wide" or "character-specific")
+                .. ", " .. (binding.legacy and "BP1 exact replacement" or "BP2") .. ")"
+        end
+        lines[1] = ("%s - Bindings: %d to change, %d already correct, %d safely preserved.")
+            :format(title, r.bound, r.bindsSame, binding and binding.preserved or 0)
+        lines[2] = ("Displaced commands: %d. Orphaned: %d. Blocking errors: %d. Runtime override warnings: %d.")
+            :format(binding and binding.displaced or 0, binding and binding.orphaned or 0,
+                binding and #binding.errors or 0, binding and binding.overrideWarnings or 0)
+        if r.placed + r.cleared + r.same + r.macrosNew + r.macrosChanged + r.macrosSame > 0 then
+            lines[#lines + 1] = ("Slots: %d to fill, %d to clear, %d already right. Macros: %d new, %d changed, %d unchanged.")
+                :format(r.placed, r.cleared, r.same, r.macrosNew, r.macrosChanged, r.macrosSame)
+        end
     else
         lines[1] = ("Done: %d slots filled, %d already right, %d cleared. Macros: %d new, %d changed. Keys: %d set.")
             :format(r.placed, r.same, r.cleared, r.macrosNew, r.macrosChanged, r.bound)
-    end
-    if r.binding then
-        local binding = r.binding
-        table.insert(lines, 1, (#binding.errors > 0 and "BLOCKED" or "Bindings") .. " - "
-            .. (binding.before.set == 1 and "account-wide" or "character-specific")
-            .. (binding.legacy and " (BP1 exact replacement)" or " (BP2)"))
-        for _, msg in ipairs(binding.errors) do lines[#lines + 1] = "|cffff6060" .. msg .. "|r" end
-        for _, msg in ipairs(binding.lines) do lines[#lines + 1] = msg end
     end
     if r.copied + r.copiedSame > 0 then
         local _, class = UnitClass("player")
@@ -613,14 +618,24 @@ local function reportLines(r, dry)
         lines[#lines + 1] = ("Copies for bar addons that switch the main bar in %s: %d %s, %d already right.")
             :format(table.concat(names, " and "), r.copied, dry and "to change" or "changed", r.copiedSame)
     end
-    if #r.notLearned > 0 then
+    if binding then
+        for _, msg in ipairs(binding.errors) do lines[#lines + 1] = "|cffff6060" .. msg .. "|r" end
+        for _, msg in ipairs(binding.lines) do lines[#lines + 1] = msg end
+        if verbose then
+            for _, msg in ipairs(binding.details) do lines[#lines + 1] = msg end
+        end
+    end
+    -- Check already names each skipped slot, its current contents and the reason.
+    if not dry and #r.notLearned > 0 then
         lines[#lines + 1] = ("Not learned yet (or misspelled), skipped (%d): %s"):format(#r.notLearned, table.concat(r.notLearned, ", "))
     end
-    if #r.notInBags > 0 then
+    if not dry and #r.notInBags > 0 then
         lines[#lines + 1] = ("Not in your bags, skipped (%d): %s"):format(#r.notInBags, table.concat(r.notInBags, ", "))
     end
     for _, s in ipairs(r.slotDetails) do lines[#lines + 1] = s end
-    for _, s in ipairs(r.skipped) do lines[#lines + 1] = "Skipped " .. s end
+    if not dry then
+        for _, s in ipairs(r.skipped) do lines[#lines + 1] = "Skipped " .. s end
+    end
     for _, p in ipairs(r.problems) do lines[#lines + 1] = "|cffff6060" .. p .. "|r" end
     return lines
 end
@@ -682,6 +697,7 @@ end
 ------------------------------------------------------------------------
 
 local frame
+local SETUP_HELP = "BP2 setup: action slots, macros used on those slots, and supported keybindings. Press Ctrl+C to copy."
 
 local function showStatus(lines)
     for _, l in ipairs(lines) do say(l) end
@@ -692,7 +708,7 @@ local function showStatus(lines)
 end
 
 local checked
-function BP.run(text, dry)
+function BP.run(text, dry, verbose)
     if dry then checked = nil end
     if InCombatLockdown() then
         showStatus({ "Can't change bars or keys in combat. Try again after the fight." })
@@ -725,7 +741,7 @@ function BP.run(text, dry)
     if not ok or not r then showStatus({ "Stopped: " .. tostring(failure or r) }); return end
     if dry and preview and #preview.errors == 0 then checked = { text = trim(text), preview = preview } end
     if not dry then BarsmithDB.last = trim(text) end
-    showStatus(reportLines(r, dry))
+    showStatus(reportLines(r, dry, verbose))
 end
 
 local function buildFrame()
@@ -749,7 +765,7 @@ local function buildFrame()
     help:SetPoint("TOPLEFT", 16, -34)
     help:SetPoint("TOPRIGHT", -16, -34)
     help:SetJustifyH("LEFT")
-    help:SetText("Paste a plan string from the Barsmith page (Ctrl+V). Check shows what would change, Apply does it.")
+    help:SetText("Paste a plan and click Check. Shift-click Check for all binding details. Apply makes the changes.")
 
     local scroll = CreateFrame("ScrollFrame", "BarsmithScroll", f, "UIPanelScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", 18, -56)
@@ -797,13 +813,13 @@ local function buildFrame()
         b:SetScript("OnClick", onClick)
         return b
     end
-    button("Check", 16, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), true) end)
+    button("Check", 16, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), true, IsShiftKeyDown()) end)
     button("Apply", 88, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), false) end)
-    button("Export my bars", 160, 117, function()
+    button("Export setup", 160, 117, function()
         edit:SetText(BP.exportCurrent())
         edit:SetFocus()
         edit:HighlightText()
-        status:SetText("This is your current setup. Press Ctrl+C to copy it, then use Load in the planner.")
+        status:SetText(SETUP_HELP)
     end)
     button("Clear", 281, 55, function() edit:SetText(""); edit:SetFocus() end)
     button("Census", 338, 72, function()
@@ -912,7 +928,7 @@ SlashCmdList.BARSMITH = function(msg)
         openFrame(BP.exportCurrent())
         frame.edit:SetFocus()
         frame.edit:HighlightText()
-        frame.status:SetText("This is your current setup. Press Ctrl+C to copy it, then use Load in the planner.")
+        frame.status:SetText(SETUP_HELP)
     elseif frame and frame:IsShown() then
         frame:Hide()
     else

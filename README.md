@@ -13,7 +13,7 @@ Set up your WoW Forever action bars, macros and keybinds in the browser, then lo
 ## Getting it into the game
 
 1. Copy this branch's `addon/Barsmith` directory into `Interface/AddOns`, then reload the game. Open this branch's `index.html` in a browser.
-2. In `/barsmith`, **Export my bars** copies the current supported slots, macros and bar-planner key assignments into a BP2 plan. Press Ctrl+C and **Load** it on the page. **Census** produces a separate BC1 snapshot. Copy it and **Load** it with that plan open. Both strings can be given to an external planner.
+2. In `/barsmith`, **Export setup** copies the current supported slots, macros and bar-planner key assignments into a BP2 plan. Press Ctrl+C and **Load** it on the page. **Census** produces a separate BC1 snapshot. Copy it and **Load** it with that plan open. Both strings can be given to an external planner.
 3. Edit bar buttons as usual. Under **Binding instructions and collision preview**, add or delete individual instructions, including secondary keys and commands from addons. Deleting an instruction leaves that relationship unmanaged. To release a key in game, add a **REMOVE** instruction naming its current owner.
 4. Copy the plan, paste it into `/barsmith` out of combat, and press **Check**. Review the active account/character scope, slot changes and full scrollable binding report. Resolve blocked commands and check again. **Apply** revalidates the checked binding graph before touching any slots, macros or bindings.
 5. Auto-fill still places learned spells into empty planned slots. `/barsmith apply` reopens the last plan for review and another Apply.
@@ -63,7 +63,7 @@ New binding: CTRL-B -> TOGGLEBACKPACK
 TOGGLEBACKPACK remains on CTRL-B
 ```
 
-Leaving out the CTRL-B assignment produces `Orphan: TOGGLEBACKPACK will be unbound.` and blocks Apply. An already-correct R produces a separate preservation line for NUMLOCK if present.
+Leaving out the CTRL-B assignment produces `Orphan: TOGGLEBACKPACK will be unbound.` and blocks Apply. An already-correct R and a preserved NUMLOCK contribute to the summary counts. Shift-click **Check** for the individual keys. The preserved count covers usable, unmentioned keys on commands involved in the plan.
 
 ## Census and API limits
 

@@ -115,8 +115,9 @@ function B.key(raw)
 end
 
 function B.preview(plan, s)
-    local p = { before = s, desired = {}, changes = {}, lines = {}, errors = {}, same = 0 }
-    local assigned, touched, allowed = {}, {}, {}
+    local p = { before = s, desired = {}, changes = {}, lines = {}, details = {}, errors = {},
+        same = 0, displaced = 0, preserved = 0, orphaned = 0, overrideWarnings = 0 }
+    local assigned, touched, allowed, lost = {}, {}, {}, {}
     local function problem(msg) p.errors[#p.errors + 1] = msg end
     local function claim(key, command)
         if p.desired[key] ~= nil and p.desired[key] ~= command then
@@ -156,12 +157,16 @@ function B.preview(plan, s)
         final[k] = new
         if old == new then
             p.same = p.same + 1
-            p.lines[#p.lines + 1] = "Already correct: " .. k .. " -> " .. (new or "unbound")
+            p.details[#p.details + 1] = "Already correct: " .. k .. " -> " .. (new or "unbound")
         else
             p.changes[#p.changes + 1] = { key = k, old = old, new = new }
-            if old then touched[old] = true; writable(old) end
+            if old then
+                touched[old], lost[old] = true, true
+                writable(old)
+            end
         end
         if s.overrides[k] then
+            p.overrideWarnings = p.overrideWarnings + 1
             p.lines[#p.lines + 1] = "Override on " .. k .. ": " .. s.overrides[k] .. " (runtime layer)"
         end
     end
@@ -171,6 +176,7 @@ function B.preview(plan, s)
         if not c.new then msg = (plan.version == 1 and "Legacy exact removal: " or "Explicit removal: ") .. c.key .. " from " .. c.old
         elseif c.old then
             msg = "Displacement: " .. c.key .. " from " .. c.old .. " to " .. c.new
+            if not taken[c.old] then p.displaced = p.displaced + 1 end
             taken[c.old] = true
         else msg = "New binding: " .. c.key .. " -> " .. c.new end
         p.lines[#p.lines + 1] = msg
@@ -178,25 +184,35 @@ function B.preview(plan, s)
     for cmd in pairs(assigned) do touched[cmd] = true end
     local finalKeys = sorted(final)
     for _, cmd in ipairs(sorted(touched)) do
-        local remaining, preserved, usable = {}, {}, false
+        local remaining, preserved, masked, usable = {}, {}, {}, false
         for _, key in ipairs(finalKeys) do
             if final[key] == cmd then
                 remaining[#remaining + 1] = key
-                if not s.overrides[key] or s.overrides[key] == cmd then usable = true end
+                if not s.overrides[key] or s.overrides[key] == cmd then
+                    usable = true
+                    if p.desired[key] == nil then p.preserved = p.preserved + 1 end
+                elseif lost[cmd] and p.desired[key] == nil then
+                    masked[#masked + 1] = key .. " -> " .. s.overrides[key]
+                end
                 if p.desired[key] == nil then preserved[#preserved + 1] = key end
             end
         end
         if #remaining == 0 then
+            p.orphaned = p.orphaned + 1
             local msg = "Orphan: " .. cmd .. " will be unbound."
             if taken[cmd] and not allowed[cmd] then problem(msg)
             else p.lines[#p.lines + 1] = msg .. " Explicitly requested." end
-        elseif taken[cmd] then
+        elseif lost[cmd] then
             p.lines[#p.lines + 1] = cmd .. " remains on " .. table.concat(remaining, ", ")
-            if not usable and not allowed[cmd] then
+            if #masked > 0 then
+                p.lines[#p.lines + 1] = "Runtime overrides on remaining keys: " .. table.concat(masked, ", ")
+                p.overrideWarnings = p.overrideWarnings + 1
+            end
+            if taken[cmd] and not usable and not allowed[cmd] then
                 problem("All remaining keys for " .. cmd .. " have runtime overrides.")
             end
         end
-        if #preserved > 0 then p.lines[#p.lines + 1] = "Preserved on " .. cmd .. ": " .. table.concat(preserved, ", ") end
+        if #preserved > 0 then p.details[#p.details + 1] = "Preserved on " .. cmd .. ": " .. table.concat(preserved, ", ") end
     end
     p.final = final
     return p

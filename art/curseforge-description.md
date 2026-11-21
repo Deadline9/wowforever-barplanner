@@ -14,16 +14,16 @@ Apply creates or updates the plan's macros, puts spells, macros + items on their
 
 - Spells you haven't learned yet are skipped and go onto their planned button once you learn them (as long as that button is still empty). Same for items you pick up later. `/barsmith auto` turns that off
 - Stance and form bars: warrior stances, Cat + Bear Form and Stealth swap the main bar, so on the page you plan the main bar once per stance and the addon fills each of those pages
-- **Export my bars** in `/barsmith` turns your current bars into a string you can load into the page, so you don't have to start from scratch
+- **Export setup** in `/barsmith` exports action slots, their macros and supported keybindings as a BP2 plan. **Census** exports a separate read-only BC1 binding snapshot
 - It refuses a plan made for another class (no Shaman bars on your Warrior)
 - Works with EllesmereUI, Bartender4, Dominos and ElvUI: they show the game's normal bar slots and pass the keybinds on to their own buttons. They number bars by action page though, so Bar 2 on the page is their bar 6, Bar 3 is 5, Bar 4 is 3, Bar 5 is 4 and Bars 6-8 are 13-15 (Dominos: 12-14)
 
 ## Commands
 
-- `/barsmith` opens the window (paste, Check, Apply, Export my bars)
+- `/barsmith` opens the window (paste, Check, Apply, Export setup)
 - `/barsmith apply` runs the last applied plan again
 - `/barsmith auto` turns auto-fill for newly learned spells on or off
-- `/barsmith export` opens the window with your current bars as a string
+- `/barsmith export` opens the window with your current BP2 setup
 
 ## Known issues
 
