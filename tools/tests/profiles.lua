@@ -354,7 +354,7 @@ test("clear then reserve a future slot in an older hand-authored plan", function
     spell(1, 1)
     local text = plan("SLOT\t1\tclear\t\nSLOT\t1\tspell\tDash")
     local summary, _, details = BP.run(text, true)
-    has(summary, "1 occupied slots will be replaced now")
+    has(summary, "1 occupied slot will be replaced now")
     has(details, "reserved for Dash")
     has(BP.run(text, false), "Done:")
     assert(not idAt(1) and P.active().pending[1])
@@ -425,6 +425,26 @@ test("a pending Check cannot be reused across character changes", function()
     w.guid = "Player-B"
     has(BP.run(text, false), "Run Check before Apply")
     assert(not idAt(1) and w.keys.B == "PACK")
+end)
+
+test("an existing placed macro changed after Apply blocks Revert", function()
+    CreateMacro("Shared", 91, "/cast Thorns", true)
+    apply(plan("SLOT\t1\tmacro\tShared"))
+    w.macros.Shared.body = "/wave"
+    has(BP.revert(false), "Placed slot macro changed")
+    assert(idAt(1) == "Shared")
+end)
+
+test("macro body change while a leveling batch is open requires fresh review", function()
+    CreateMacro("Old", 91, "/dance", true)
+    char().slots[1] = { "macro", "Old" }
+    apply(plan("SLOT\t1\tspell\tDash"))
+    char().known[3] = true
+    BP.levelUpdates("review")
+    w.macros.Old.body = "/wave"
+    BP.levelUpdates("confirm")
+    has(w.chat, "replacements changed")
+    assert(idAt(1) == "Old")
 end)
 
 print(passed .. " passed, " .. failed .. " failed")

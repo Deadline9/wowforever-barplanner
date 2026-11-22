@@ -171,10 +171,10 @@ test("mixed versions rejected", function()
 end)
 test("slot dry run reports skipped stale and cleared actions", function()
     run("SLOT\t4\tspell\tFuture Spell\nSLOT\t5\tclear\t")
-    says("spell 100 -> keep current (skipped Future Spell)")
+    says("spell 100 -> Future Spell (future replacement; keep current: not learned yet)")
     says("spell 100 -> empty")
     local _, mentions = table.concat(details):gsub("Future Spell", "")
-    assert(mentions == 2) -- skipped now and named in the future replacement
+    assert(mentions == 1)
     assert(slotEdits == 0)
 end)
 test("explicit last removal is intentional", function()
@@ -277,7 +277,7 @@ test("Details keeps changes and safety issues in a mixed report", function()
         .. "SLOT\t4\tspell\tFuture Spell\nSLOT\t5\tclear\t\nSLOT\t6\tspell\tspell:100")
     local changes = table.concat(details, "\n")
     for _, msg in ipairs({"Displacement: B", "PACK will be unbound", "Runtime override on F2",
-        "New binding: F2", "Explicit removal: R", "RUN remains on", "skipped Future Spell", "[5]: spell 100 -> empty"}) do
+        "New binding: F2", "Explicit removal: R", "RUN remains on", "Future Spell (future replacement", "[5]: spell 100 -> empty"}) do
         assert(changes:find(msg, 1, true), changes)
         assert(table.concat(full, "\n"):find(msg, 1, true))
     end
@@ -397,13 +397,14 @@ test("setup export round-trips exact slot IDs", function()
     GetNumSpellTabs, GetSpellTabInfo, GetSpellBookItemName, GetSpellBookItemInfo = nil, nil, nil, nil
 end)
 test("real frame gates Apply, switches reports, and invalidates edits immediately", function()
-    local buttons, window = {}
+    local buttons, window, profileName = {}
     local noop = function() end
     local methods = {}
-    local function widget(kind, name)
+    local function widget(kind, name, parent, template)
         local w = setmetatable({ kind = kind, scripts = {}, enabled = true, text = "" },
             { __index = function(_, k) return methods[k] or noop end })
         if name == "BarsmithFrame" then window = w end
+        if template == "InputBoxTemplate" then profileName = w end
         return w
     end
     methods.CreateFontString, methods.CreateTexture = widget, widget
@@ -477,6 +478,25 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     assert(not buttons.Apply.enabled and window.status.text:find("competing instructions"))
     click("Details")
     assert(window.status.text:find("competing instructions"))
+
+    -- Use the actual window controls to save a draft, apply, preview/cancel
+    -- Revert, confirm it, and delete the profile.
+    local plan = BP.serialize({ binds = {{ key = "B", command = "BUTTON" }} })
+    window.edit:SetText(plan)
+    profileName:SetText("Healing")
+    click("Save new")
+    local profile, character = BP.profiles.active()
+    assert(character.active == "Healing" and profile.text == plan and owners.B == "ADDON")
+    click("Check"); click("Apply")
+    assert(owners.B == "BUTTON" and profile.undo)
+    click("Revert last Apply"); click("Details")
+    assert(window.status.text:find("ADDON") and owners.B == "BUTTON")
+    click("Cancel")
+    assert(profile.undo and owners.B == "BUTTON")
+    click("Revert last Apply"); click("Confirm revert")
+    assert(owners.B == "ADDON" and not profile.undo)
+    click("Delete"); click("Delete profile")
+    assert(character.active == "Default" and not character.profiles.Healing)
 end)
 print(passed .. " passed, " .. failures .. " failed")
 assert(failures == 0)

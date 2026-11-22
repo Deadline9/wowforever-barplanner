@@ -564,7 +564,7 @@ local function reviewPlan(plan, preview)
                 description = "keep current (skipped " .. s.value .. "): " .. tostring(why)
                 if r.pending[s.slot] and before.kind ~= "empty" then
                     r.futureOverwrites = r.futureOverwrites + 1
-                    description = description .. ". Future replacement: " .. label(before) .. " -> " .. s.value
+                    description = s.value .. " (future replacement; keep current: " .. tostring(why) .. ")"
                 end
             end
         end
@@ -574,7 +574,7 @@ local function reviewPlan(plan, preview)
                 r.same = r.same + 1
             else
                 requireRestorable(s.slot, before)
-                table.insert(r.ops, { slot = s.slot, before = before, after = after, previousMacro = oldMacro })
+                table.insert(r.ops, { slot = s.slot, before = before, after = after, previousMacro = oldMacro, placedMacro = nextMacro })
                 pickups[#r.ops] = pickup
                 if before.kind ~= "empty" then r.overwrites = r.overwrites + 1 end
                 if after.kind == "empty" then r.cleared = r.cleared + 1 else r.placed = r.placed + 1 end
@@ -621,8 +621,9 @@ local function reportLines(r, dry)
             summary[#summary + 1] = counts
         end
         if r.overwrites > 0 or r.futureOverwrites > 0 then
-            highlight(("%d occupied slots will be replaced now. %d occupied slots have future replacements.")
-                :format(r.overwrites, r.futureOverwrites))
+            highlight(countLabel(r.overwrites, "occupied slot") .. " will be replaced now. "
+                .. countLabel(r.futureOverwrites, "occupied slot")
+                .. (r.futureOverwrites == 1 and " has a future replacement." or " have future replacements."))
         end
         if r.macrosNew + r.macrosChanged > 0 then
             highlight(("Macros: %d new, %d changed."):format(r.macrosNew, r.macrosChanged))
@@ -892,6 +893,10 @@ local function revertPlan(profile)
         assert(C.equal(C.read(op), op.after), where .. " changed since Apply.")
         if op.slot then
             requireRestorable(op.slot, op.before)
+            if op.placedMacro and not editedMacros[op.placedMacro.name:lower()] then
+                assert(C.equal(C.macro(op.placedMacro.name), op.placedMacro),
+                    "Placed slot macro changed: " .. op.placedMacro.name)
+            end
             if op.previousMacro and not editedMacros[op.previousMacro.name:lower()] then
                 assert(C.equal(C.macro(op.previousMacro.name), op.previousMacro),
                     "Previous slot macro changed: " .. op.previousMacro.name)
@@ -926,7 +931,11 @@ local function revertPlan(profile)
         for _, msg in ipairs(preview.lines) do table.insert(lines, msg) end
         for _, msg in ipairs(preview.warnings) do table.insert(lines, msg) end
     end
-    table.insert(lines, "Restore this profile's previous saved plan and pending leveling placements.")
+    local old = u.before.text and BP.parse(u.before.text)
+    local name = old and (old.name ~= "" and old.name or "unnamed plan") or "no saved plan"
+    local count = 0
+    for _ in pairs(u.before.pending or {}) do count = count + 1 end
+    table.insert(lines, "Restore profile to " .. name .. " with " .. countLabel(count, "pending placement") .. ".")
     return ops, preview, lines
 end
 
@@ -937,13 +946,14 @@ function BP.revert(confirm)
     local ok, result = pcall(function()
         assert(profile, "Character identity unavailable.")
         if confirm then
-            assert(previous and previous.kind == "revert" and previous.profile == profile and previous.undo == profile.undo,
+            assert(previous and previous.kind == "revert" and previous.profile == profile and previous.undo == profile.undo
+                and C.equal(previous.state, profileState(profile)),
                 "Preview Revert again.")
         end
         local ops, preview, lines = revertPlan(profile)
         if not confirm then
             return showReview("revert", "Revert last Apply? Open Details to review the batch.", lines,
-                { profile = profile, undo = profile.undo, preview = preview })
+                { profile = profile, undo = profile.undo, state = profileState(profile), preview = preview })
         end
         local u = profile.undo
         C.execute(ops, u.bindings and u.bindings.plan, previous.preview)
@@ -1207,6 +1217,7 @@ local function levelBatch(profile)
                     table.insert(batch.settled, s.slot)
                 else
                     local op = { slot = s.slot, before = before, after = { kind = s.kind, id = target.id } }
+                    if before.kind == "macro" then op.previousMacro = C.macro(before.name) end
                     table.insert(before.kind == "empty" and batch.empty or batch.occupied, op)
                     pickups[s.slot] = target.pickup
                 end
