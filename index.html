@@ -320,11 +320,27 @@ ol.steps li, .howto ul li { margin-bottom: 5px; }
     <textarea id="out" readonly spellcheck="false"></textarea>
     <div class="row" style="margin-top:8px"><button class="btn primary" id="copy">Copy plan string</button><span class="stats" id="stats"></span></div>
     <ul class="warnings" id="warnings"></ul>
+    <details id="migration">
+      <summary>Binding instructions and collision preview</summary>
+      <p class="note" id="bindingStatus"></p>
+      <button class="btn" id="convert" hidden>Convert BP1 to preservation-safe BP2</button>
+      <div class="row">
+        <select aria-label="Binding operation" id="bindOp"><option>ENSURE</option><option>REMOVE</option><option>ALLOWORPHAN</option></select>
+        <input aria-label="Key" id="opKey" placeholder="CTRL-B" size="10">
+        <input aria-label="Command" id="opCommand" placeholder="Command" list="commandList">
+        <datalist id="commandList"></datalist>
+        <button class="btn" id="addOp">Add instruction</button>
+      </div>
+      <p class="note" id="opMsg" role="status"></p>
+      <div id="bindingRecords"></div>
+      <ul class="warnings" id="migrationLines"></ul>
+      <details id="censusView" hidden><summary>Current binding census</summary><pre style="overflow:auto;max-height:20rem" id="censusRows"></pre></details>
+    </details>
   </section>
   <section class="panel">
     <h2>Load a plan</h2>
-    <p class="note" style="margin:0 0 8px">Paste a string from this page, or from <b>Export my bars</b> in <code>/barsmith</code>. It's added as a new plan for its class.</p>
-    <textarea id="in" rows="3" spellcheck="false" placeholder="BP1:..."></textarea>
+    <p class="note" style="margin:0 0 8px">Load a plan from this page or use <b>Export setup</b> in <code>/barsmith</code> for a BP2 plan with action slots, macros and supported keybindings. Load a separate read-only BC1 Census for a collision preview on the open plan.</p>
+    <textarea id="in" rows="3" spellcheck="false" placeholder="BP2, BP1, or BC1 census"></textarea>
     <div class="row" style="margin-top:8px">
       <button class="btn primary" id="load">Load</button>
       <button class="btn" id="example">Load example</button>
@@ -337,11 +353,11 @@ ol.steps li, .howto ul li { margin-bottom: 5px; }
       <li>Download <a href="Barsmith.zip">Barsmith.zip</a> and unzip it into the game's <code>Interface/AddOns</code> folder, so you get <code>Interface/AddOns/Barsmith</code>. Source: <a href="https://github.com/rubensayshi/wowforever-barplanner">github.com/rubensayshi/wowforever-barplanner</a>.</li>
       <li>Plan here, per class. The level slider greys out spells you won't have yet.</li>
       <li>In game, out of combat: <code>/barsmith</code>, paste, <b>Check</b>, <b>Apply</b>. Spells you haven't learned are skipped.</li>
-      <li>Later spells go onto their planned button when you learn them (if it's empty). <code>/barsmith apply</code> runs the plan again.</li>
+      <li>Later spells go onto their planned button when you learn them (if it's empty). <code>/barsmith apply</code> reopens the last plan for Check and Apply.</li>
     </ol>
     <ul>
       <li>Bars 2 to 8 use their own action slots. The main bar has extra pages that only show in a stance or form (slots 73–120), so a warrior plans the main bar once per stance. The arrows next to Bar 1 switch to its page 2 (Shift+2 in game); pages 3 to 6 are the same buttons as bars 4, 5, 3 and 2.</li>
-      <li>Apply only touches buttons and keys in the plan. A planned button ends up with exactly the key set here.</li>
+      <li>New plans preserve other keys on each command. Check warns when a command loses its last key and blocks unsafe or conflicting changes.</li>
       <li>Spells, talents and racials are Forever's, from <a href="https://wowforevertalents.com/">wowforevertalents.com</a> (read from the Forever client and its hotfixes). New ones have a ★. Tooltips come from Wowhead's Forever database. Any name typed in by hand works too.</li>
       <li>The idea comes from <a href="https://naowh.gg/forever/action-bars">Naowh's Forever action bar planner</a>, which only sets up bars for their own addon suite.</li>
       <li>Turn on the bars you use in your bar addon's settings. Some addons number them differently: Bartender4, for example, calls Bar 2 bar 6. Some of them also switch the main bar for Shadowform, Moonkin Form or Prowl; the addon copies the right buttons onto those pages too. The stance and pet bar contents come from the game; only their keys are planned.</li>
@@ -423,25 +439,8 @@ const OTHER = [
 const OTHER_LABEL = Object.fromEntries(OTHER);
 const BAR1_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="];
 
-// The game's default keys: what a key does, and which command owns it by default.
-const GAME_DEFAULTS = {
-  W: "Move forward", S: "Move backward", A: "Turn left", D: "Turn right", Q: "Strafe left", E: "Strafe right",
-  SPACE: "Jump", X: "Sit / stand", Z: "Sheathe weapon", TAB: "Target nearest enemy", ENTER: "Open chat",
-  "/": "Chat command", R: "Reply to whisper", B: "Open bags", C: "Character window", P: "Spellbook",
-  N: "Talents", L: "Quest log", M: "World map", O: "Social", K: "Skills", U: "Reputation", H: "Honor",
-  I: "Group finder", V: "Enemy nameplates", T: "Attack", G: "Next pet", NUMLOCK: "Autorun",
-  F1: "Target self", F2: "Target party member 1", F3: "Target party member 2", F4: "Target party member 3",
-  F5: "Target party member 4", "SHIFT-UP": "Previous action page", "SHIFT-DOWN": "Next action page",
-  "ALT-Z": "Hide the UI", UP: "Move forward", DOWN: "Move backward", LEFT: "Turn left", RIGHT: "Turn right", PRINTSCREEN: "Screenshot",
-};
-const DEFAULT_OWNER = {};
-for (let i = 1; i <= 6; i++) GAME_DEFAULTS["SHIFT-" + i] = "Action page " + i;
-for (let i = 1; i <= 10; i++) { const k = "CTRL-" + (i % 10); GAME_DEFAULTS[k] = "Pet bar button " + i; DEFAULT_OWNER[k] = "BONUSACTIONBUTTON" + i; }
-for (let i = 1; i <= 10; i++) { const k = "CTRL-F" + i; GAME_DEFAULTS[k] = "Stance button " + i; DEFAULT_OWNER[k] = "SHAPESHIFTBUTTON" + i; }
-BAR1_KEYS.forEach((k, i) => { GAME_DEFAULTS[k] = "Bar 1 button " + (i + 1); DEFAULT_OWNER[k] = "ACTIONBUTTON" + (i + 1); });
-
 const MAX_MACRO_BYTES = 255, MAX_MACRO_NAME = 16, MAX_GENERAL = 120, MAX_CHAR = 18;
-const STORE = "barplanner.v3";
+const STORE = "barplanner.binding-safety.v1";
 const ICON = (name, size = "large") => `https://wow.zamimg.com/images/wow/icons/${size}/${String(name).toLowerCase()}.jpg`;
 
 // ---- State ----
@@ -456,12 +455,19 @@ let pageBeforePage2 = 0;
 const restPage = () => (app.cls === "WARRIOR" ? 73 : 0);
 let kbMode = false, hoverCmd = null, capture = null, lastBound = "";
 
+function fromLegacy(binds, op) {
+  return Object.entries(binds || {}).filter(([, key]) => key).map(([command, key]) => ({op, key, command}));
+}
+function migrateStored(p) {
+  if (!Array.isArray(p.binds)) { p.binds = fromLegacy(p.binds, "BIND"); p.version = 1; }
+  return p;
+}
 function emptyPlan(cls) {
   const binds = {};
   BAR1_KEYS.forEach((k, i) => { binds["ACTIONBUTTON" + (i + 1)] = k; });
   (D.stances[cls] || []).forEach((_, i) => { binds["SHAPESHIFTBUTTON" + (i + 1)] = "CTRL-F" + (i + 1); });
   if (PET_CLASSES.includes(cls)) for (let i = 1; i <= 10; i++) binds["BONUSACTIONBUTTON" + i] = "CTRL-" + (i % 10);
-  return { id: newId(), cls, name: "", shown: ["b1", "b2", "b3"], slots: {}, macros: [], binds };
+  return { id: newId(), cls, name: "", shown: ["b1", "b2", "b3"], slots: {}, macros: [], version: 2, binds: fromLegacy(binds, "ENSURE") };
 }
 function newId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 function classPlans(cls = app.cls) { return app.plans.filter((p) => p.cls === cls); }
@@ -481,7 +487,7 @@ function P() {
 
 // A plan nobody has touched yet: opening a class makes one, but it isn't worth keeping.
 function isBlank(p) {
-  return !Object.keys(p.slots).length && !p.macros.length && /^(Plan \d+)?$/.test(p.name)
+  return !p.census && p.version !== 1 && !Object.keys(p.slots).length && !p.macros.length && /^(Plan \d+)?$/.test(p.name)
     && JSON.stringify(p.binds) === JSON.stringify(emptyPlan(p.cls).binds);
 }
 // Plans live in this browser's storage. The plan string is the way to move them elsewhere.
@@ -497,14 +503,14 @@ function save() {
 function restore() {
   try { localStorage.removeItem("barplanner.backdrop"); } catch (e) { /* custom backdrops are gone */ }
   try {
-    const raw = localStorage.getItem(STORE);
-    if (raw) { const a = JSON.parse(raw); if (a && Array.isArray(a.plans)) { app = Object.assign(app, a, { cur: a.cur || {} }); return; } }
+    const raw = localStorage.getItem(STORE) ?? localStorage.getItem("barplanner.v3");
+    if (raw) { const a = JSON.parse(raw); if (a && Array.isArray(a.plans)) { app = Object.assign(app, a, { cur: a.cur || {}, plans: a.plans.map(migrateStored) }); return; } }
     const v2 = localStorage.getItem("barplanner.v2"); // second version: one plan per class
     if (v2) {
       const a = JSON.parse(v2);
       if (a && a.plans) {
         for (const [cls, p] of Object.entries(a.plans)) {
-          if (CLASS_NAME[cls] && p && p.slots) addPlan(Object.assign(emptyPlan(cls), p, { id: newId(), cls, name: p.name || "Plan 1" }));
+          if (CLASS_NAME[cls] && p && p.slots) addPlan(Object.assign(emptyPlan(cls), migrateStored(p), { id: newId(), cls, name: p.name || "Plan 1" }));
         }
         for (const k of ["cls", "race", "level", "tab"]) if (a[k] != null) app[k] = a[k];
         return;
@@ -513,7 +519,7 @@ function restore() {
     const old = localStorage.getItem("barplanner.v1"); // first version: one shaman plan
     if (old) {
       const s = JSON.parse(old);
-      if (s && s.slots) addPlan(Object.assign(emptyPlan("SHAMAN"), s, { id: newId(), cls: "SHAMAN", name: s.name || "Plan 1", shown: (s.shown || []).filter((k) => /^b\d$/.test(k)) }));
+      if (s && s.slots) addPlan(Object.assign(emptyPlan("SHAMAN"), migrateStored(s), { id: newId(), cls: "SHAMAN", name: s.name || "Plan 1", shown: (s.shown || []).filter((k) => /^b\d$/.test(k)) }));
     }
   } catch (e) { /* ignore */ }
 }
@@ -675,19 +681,16 @@ const shortKey = (k) => k.replace("ALT-", "a").replace("CTRL-", "c").replace("SH
   .replace("MOUSEWHEELUP", "WU").replace("MOUSEWHEELDOWN", "WD").replace(/BUTTON(\d+)$/, "M$1").replace("NUMPAD", "N")
   .replace("BACKSPACE", "Bs").replace("SPACE", "Spc").replace("PAGEUP", "PU").replace("PAGEDOWN", "PD")
   .replace("INSERT", "Ins").replace("DELETE", "Del").replace("CAPSLOCK", "Caps");
+function primary(cmd) {
+  return P().binds.find(b => (b.op === "ENSURE" || b.op === "BIND") && b.command === cmd);
+}
+function primaryKey(cmd) { return primary(cmd)?.key || ""; }
 function setBind(cmd, key) {
-  const b = P().binds;
-  if (!key) { delete b[cmd]; return; }
-  for (const [c, k] of Object.entries(b)) if (k === key && c !== cmd) delete b[c];
-  b[cmd] = key;
+  const p = P(), prev = primary(cmd);
+  // Change this one planned relationship. Other keys remain editable in the full list.
+  p.binds = p.binds.filter(b => b !== prev && !(key && b.key === key && (b.op === "ENSURE" || b.op === "BIND")));
+  if (key) p.binds.unshift({op: p.version === 1 ? "BIND" : "ENSURE", key, command: cmd});
 }
-function keyNote(cmd) {
-  const key = P().binds[cmd];
-  if (!key || DEFAULT_OWNER[key] === cmd) return "";
-  const def = GAME_DEFAULTS[key];
-  return def && def !== OTHER_LABEL[cmd] ? `<p class="note warn">Takes ${esc(key)} off its game default: ${esc(def)}.</p>` : "";
-}
-
 // ---- Rendering: header ----
 function renderHeader() {
   $("classes").innerHTML = CLASSES.map(([k, n, c]) => `<button class="cls" data-cls="${k}" aria-pressed="${app.cls === k}" aria-label="${n}" data-tip="${esc(tip(n, "~" + racesFor(k).join(", "), app.cls === k ? "" : "+Click to plan this class"))}" style="--cc:${c};background-image:url(${ICON("classicon_" + k.toLowerCase(), "medium")})"></button>`).join("");
@@ -706,7 +709,7 @@ function buttonHtml({ attrs, icon, text, name, key, level, cls }) {
 }
 function slotHtml(slot, cmd) {
   const s = P().slots[slot];
-  const key = P().binds[cmd];
+  const key = primaryKey(cmd);
   const info = slotInfo(slot);
   let icon = null, text = "", name = "", level = 0, cls = "", what = "";
   if (s) {
@@ -762,7 +765,7 @@ function stanceBarHtml() {
     if (lvl > app.level) cls += " unlearned";
     if (s.page && page === s.page) cls += " stance-on";
     if (sel && sel.cmd === cmd) cls += " sel";
-    const key = P().binds[cmd];
+    const key = primaryKey(cmd);
     const t = tip(s.n, "~Stance bar", key && "#Key: " + key, lvl > app.level && "!Requires level " + lvl,
       s.page ? "+Click to plan the main bar for it" : "~Doesn't change the main bar");
     return buttonHtml({ attrs: `data-cmd="${cmd}" data-stance="${i}" tabindex="0" role="button" aria-label="${esc(s.n)}" data-tip="${esc(t)}"${whAttr("spell", s.n)}`, icon: s.i, key, cls });
@@ -772,7 +775,7 @@ function petBarHtml() {
   if (!PET_CLASSES.includes(app.cls)) return "<div></div>";
   return `<div class="bar" aria-label="Pet bar">${PET_BAR.map(([n, icon], i) => {
     const cmd = "BONUSACTIONBUTTON" + (i + 1);
-    const key = P().binds[cmd];
+    const key = primaryKey(cmd);
     return buttonHtml({ attrs: `data-cmd="${cmd}" data-pet="${i}" tabindex="0" role="button" aria-label="${esc("Pet bar: " + n)}" data-tip="${esc(tip(n, "~Pet bar", key && "#Key: " + key, "+Click to set its key"))}"`, icon, key, cls: " fixed" + (sel && sel.cmd === cmd ? " sel" : "") });
   }).join("")}</div>`;
 }
@@ -844,7 +847,7 @@ function renderBook() {
 
 // ---- Rendering: side editors ----
 function keyRow(cmd) {
-  const key = P().binds[cmd] || "", cap = capture === cmd;
+  const key = primaryKey(cmd) || "", cap = capture === cmd;
   return `<div class="row"><input type="text" class="keyin${cap ? " capturing" : ""}" data-cmd="${cmd}" value="${esc(cap ? "press a key…" : key)}" placeholder="no key" spellcheck="false" ${cap ? "readonly" : ""}>
     <button class="btn" data-setkey="${cmd}">${cap ? "Cancel" : "Set key"}</button>${key ? `<button class="btn" data-delkey="${cmd}" title="Remove key">×</button>` : ""}</div>`;
 }
@@ -862,7 +865,7 @@ function rankSelect(value) {
 function renderEditor() {
   const el = $("editor");
   if (sel && sel.cmd) {
-    el.innerHTML = `<h2>${digits(sel.label)}</h2><p class="meta">${sel.cmd}</p><div class="field" style="margin:0">Key${keyRow(sel.cmd)}</div>${keyNote(sel.cmd)}
+    el.innerHTML = `<h2>${digits(sel.label)}</h2><p class="meta">${sel.cmd}</p><div class="field" style="margin:0">Key${keyRow(sel.cmd)}</div>
       <p class="note">What's on this button comes from the game. Only its key is planned.</p>`;
     return;
   }
@@ -886,7 +889,7 @@ function renderEditor() {
   else body = `<p class="note">Apply doesn't touch this button. Its key is still set if you give it one.</p>`;
   el.innerHTML = `<h2>${digits(info.label)}</h2><p class="meta">slot ${sel.slot} · ${info.command}</p>
     <div class="seg" role="radiogroup" aria-label="What goes on this button">${kinds.map(([k, l]) => `<button class="chip" role="radio" data-kind="${k}" aria-pressed="${s.kind === k}" aria-checked="${s.kind === k}">${l}</button>`).join("")}</div>
-    ${body}<div class="field" style="margin:12px 0 0">Key${keyRow(info.command)}</div>${keyNote(info.command)}
+    ${body}<div class="field" style="margin:12px 0 0">Key${keyRow(info.command)}</div>
     ${info.page ? `<p class="note">${info.page === PAGE2 ? "Page 2 (Shift+2 in game)" : "Stance pages"} use${info.page === PAGE2 ? "s" : ""} Bar 1's keys, so this key is also Bar 1 button ${info.index + 1}'s key.</p>` : ""}`;
 }
 function renderMacroEditor() {
@@ -912,9 +915,9 @@ function updateMacroBits() {
   $("mPreview").innerHTML = buttonHtml({ attrs: "", icon: macroIcon(m), name: m.name, cls: " fixed" });
 }
 function renderOther() {
-  const set = OTHER.filter(([c]) => P().binds[c]).length;
+  const set = OTHER.filter(([c]) => primaryKey(c)).length;
   $("otherCount").textContent = set ? `(${set} set)` : "";
-  $("otherKeys").innerHTML = OTHER.map(([cmd, label]) => `<div><div class="row"><span>${esc(label)}</span>${keyRow(cmd)}</div>${keyNote(cmd)}</div>`).join("");
+  $("otherKeys").innerHTML = OTHER.map(([cmd, label]) => `<div><div class="row"><span>${esc(label)}</span>${keyRow(cmd)}</div></div>`).join("");
   $("macroList").innerHTML = P().macros.map((m) => `<option value="${esc(m.name)}">`).join("");
 }
 
@@ -923,37 +926,49 @@ const escField = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\t/g, "\
 const unescField = (s) => String(s ?? "").replace(/\\(.)/g, (m, c) => (c === "n" ? "\n" : c === "t" ? "\t" : c === "\\" ? "\\" : m));
 function toB64(text) { let bin = ""; for (const b of new TextEncoder().encode(text)) bin += String.fromCharCode(b); return btoa(bin); }
 function fromB64(b64) { const bin = atob(b64.replace(/[^A-Za-z0-9+/]/g, "")); return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0))); }
+function decodePayload(text) {
+  const payload = text.slice(4).replace(/\s+/g, ""), raw = fromB64(payload);
+  if (!text.startsWith("BP1:") && toB64(raw) !== payload) throw new Error("Damaged encoding.");
+  return raw;
+}
 function serialize() {
   const p = P();
-  const lines = ["BARPLAN\t1", "CLASS\t" + app.cls, "RACE\t" + escField(app.race)];
+  const lines = ["BARPLAN\t" + p.version, "CLASS\t" + app.cls, "RACE\t" + escField(app.race)];
   if (p.name) lines.push("NAME\t" + escField(p.name));
   for (const m of p.macros) if (m.name) lines.push(["MACRO", escField(m.name), escField(m.icon), m.perChar ? "1" : "0", escField(m.body)].join("\t"));
   Object.keys(p.slots).map(Number).sort((a, b) => a - b).forEach((slot) => {
     const s = p.slots[slot];
     if (s.kind === "clear" || s.value) lines.push(["SLOT", slot, s.kind, escField(s.kind === "clear" ? "" : s.value)].join("\t"));
   });
-  for (const [cmd, key] of Object.entries(p.binds)) if (key) lines.push(["BIND", key, cmd].join("\t"));
-  return "BP1:" + toB64(lines.join("\n"));
+  for (const b of p.binds) {
+    const fields = b.op === "ALLOWORPHAN" ? [b.op, b.command] : [b.op, b.key, b.command];
+    lines.push((p.version === 1 ? fields : fields.map(escField)).join("\t"));
+  }
+  return "BP" + p.version + ":" + toB64(lines.join("\n"));
 }
 function parse(text) {
   text = text.trim();
-  if (!text.startsWith("BP1:")) throw new Error("That isn't a plan string. It should start with BP1:");
+  if (!/^BP[12]:/.test(text)) throw new Error("Expected a BP2 or BP1 plan.");
   let raw;
-  try { raw = fromB64(text.slice(4)); } catch (e) { throw new Error("The plan string is damaged. Copy it again."); }
-  const p = { name: "", shown: ["b1"], slots: {}, macros: [], binds: {} };
+  try { raw = decodePayload(text); } catch (e) { throw new Error("The plan string is damaged. Copy it again."); }
+  const p = { name: "", shown: ["b1"], slots: {}, macros: [], binds: [], version: Number(text[2]) };
   let version = null, cls = null, race = null;
   for (const line of raw.split("\n")) {
     const f = line.replace(/\r$/, "").split("\t");
-    if (f[0] === "BARPLAN") version = +f[1];
+    if (f[0] === "BARPLAN") { if (version !== null) throw new Error("Duplicate header."); version = +f[1]; }
     else if (f[0] === "CLASS") cls = f[1];
     else if (f[0] === "RACE") race = unescField(f[1]);
     else if (f[0] === "NAME") p.name = unescField(f[1]);
     else if (f[0] === "MACRO" && f[1]) p.macros.push({ name: unescField(f[1]), icon: unescField(f[2]), perChar: f[3] === "1", body: unescField(f[4]) });
     else if (f[0] === "SLOT" && slotInfo(+f[1]) && ["spell", "macro", "item", "clear"].includes(f[2])) p.slots[+f[1]] = { kind: f[2], value: unescField(f[3]).trim() };
-    else if (f[0] === "BIND" && f[1] && f[2] && !Object.values(p.binds).includes(f[1]) && !p.binds[f[2]]) p.binds[f[2]] = f[1];
+    else if (["BIND", "ENSURE", "REMOVE", "ALLOWORPHAN"].includes(f[0])) {
+      const ack = f[0] === "ALLOWORPHAN";
+      if ((f[0] === "BIND") !== (p.version === 1) || f.length !== (ack ? 2 : 3) || f.some(v => !v)) throw new Error("Invalid binding record.");
+      const read = p.version === 1 ? v => v : unescField;
+      p.binds.push({op: f[0], key: ack ? undefined : graphKey(read(f[1])), command: read(f[ack ? 1 : 2])});
+    } else if (p.version === 2 && f[0]) throw new Error("Unknown or malformed record: " + f[0]);
   }
-  if (!version) throw new Error("The plan string is damaged. Copy it again.");
-  if (version > 1) throw new Error("This plan was made by a newer planner.");
+  if (version !== p.version) throw new Error("Plan header and prefix must match.");
   for (const b of BARS) for (let i = 0; i < 12; i++) if (p.slots[b.first + i] && !p.shown.includes(b.key)) p.shown.push(b.key);
   return { cls: CLASS_NAME[cls] ? cls : null, race: RACES.includes(race) ? race : null, plan: p };
 }
@@ -988,11 +1003,126 @@ function warnings() {
   }
   return out;
 }
+function graphKey(raw) {
+  let key = raw.toUpperCase(), match;
+  const mods = new Set();
+  while ((match = /^(ALT|CTRL|SHIFT|META)-(.+)$/.exec(key))) {
+    mods.add(match[1]); key = match[2];
+  }
+  return [...["ALT", "CTRL", "SHIFT", "META"].filter(m => mods.has(m)), key].join("-");
+}
+function parseCensus(text) {
+  const [header, ...lines] = decodePayload(text).replace(/\n$/, "").split("\n");
+  if (!/^BINDCENSUS\t1\t[12]$/.test(header)) throw new Error("Invalid census header.");
+  const overrides = [], rows = [];
+  for (const line of lines) {
+    if (line.startsWith("OVERRIDE\t")) {
+      const [, key, action, ...extra] = line.split("\t").map(unescField);
+      if (!key || action === undefined || extra.length) throw new Error("Invalid override row.");
+      overrides.push([key, action]);
+      continue;
+    }
+    const [tag, ctx, command, category, label, type, ...keys] = line.split("\t").map(unescField);
+    if (tag !== "CMD" || !command || !/^\d+$/.test(ctx) || !["custom", "binding"].includes(type)) throw new Error("Invalid census row.");
+    rows.push({ctx: +ctx, command, category, label, type, keys});
+  }
+  if (!rows.length) throw new Error("Empty census.");
+  return {set: +header.slice(-1), rows, overrides};
+}
+function migration(p) {
+  const rows = p.census?.rows || [], owners = new Map(), desired = new Map();
+  const assigned = new Set(), allowed = new Set(), touched = new Set();
+  const lines = [], errors = [];
+  const customKeys = new Map(rows.filter(r => r.type === "custom").flatMap(r => r.keys.map(k => [k, r.command])));
+  for (const r of rows) if (!r.ctx && r.type !== "custom") for (const key of r.keys) {
+    if (owners.has(key) && owners.get(key) !== r.command) errors.push("Ambiguous owner for " + key);
+    owners.set(key, r.command);
+  }
+  function claim(key, cmd) {
+    if (desired.has(key) && desired.get(key) !== cmd) errors.push("Conflict: " + key + " has competing instructions.");
+    desired.set(key, cmd);
+  }
+  const restricted = new Set(rows.filter(r => r.ctx || r.type === "custom").map(r => r.command));
+  for (const {op, command, key} of p.binds) {
+    if (restricted.has(command)) errors.push("Unsupported binding context or custom control: " + command);
+    if (op === "ALLOWORPHAN") allowed.add(command);
+    else if (op === "REMOVE") {
+      if (owners.has(key) && owners.get(key) !== command) errors.push("Removal owner changed: " + key + " now belongs to " + owners.get(key));
+      claim(key, null);
+    } else { assigned.add(command); claim(key, command); }
+  }
+  if (!p.census) return {errors, lines};
+  if (p.version === 1) for (const [key, cmd] of owners) if (assigned.has(cmd) && !desired.has(key)) claim(key, null);
+  const final = new Map(owners), overrides = new Map(p.census.overrides);
+  for (const [key, cmd] of desired) {
+    const old = owners.get(key) || null;
+    if (customKeys.has(key) && old !== cmd) errors.push("Custom control on " + key + ": " + customKeys.get(key));
+    if (overrides.has(key)) lines.push("Runtime override on " + key + ": " + overrides.get(key));
+    if (cmd) final.set(key, cmd); else final.delete(key);
+    if (old === cmd) lines.push("Already correct: " + key + " → " + (cmd || "unbound"));
+    else {
+      if (old) {
+        touched.add(old);
+        if (restricted.has(old)) errors.push("Unsupported custom control: " + old);
+      }
+      if (!cmd) lines.push((p.version === 1 ? "Legacy exact removal: " : "Explicit removal: ") + key + " from " + old);
+      else if (old) lines.push("Displacement: " + key + " from " + old + " to " + cmd);
+      else lines.push("New binding: " + key + " → " + cmd);
+    }
+  }
+  for (const cmd of new Set([...touched, ...assigned])) {
+    const keys = [...final].filter(([, v]) => v === cmd).map(([k]) => k).sort();
+    if (!keys.length && touched.has(cmd)) {
+      lines.push("Warning: " + cmd + " will be unbound." + (allowed.has(cmd) ? " Acknowledged by plan." : ""));
+    } else if (touched.has(cmd)) {
+      lines.push(cmd + " remains on " + keys.join(", "));
+      if (!keys.some(k => !overrides.has(k) || overrides.get(k) === cmd))
+        errors.push("All remaining keys for " + cmd + " have runtime overrides.");
+    }
+    const kept = keys.filter(k => !desired.has(k));
+    if (kept.length) lines.push("Preserved on " + cmd + ": " + kept.join(", "));
+  }
+  return {errors, lines};
+}
+function renderMigration() {
+  const p = P(), {errors, lines} = migration(p);
+  $("convert").hidden = p.version !== 1;
+  $("bindOp").disabled = p.version === 1;
+  $("opKey").disabled = p.version === 2 && $("bindOp").value === "ALLOWORPHAN";
+  $("bindingStatus").textContent = (p.version === 1 ? "BP1 exact replacement. " : "BP2 preserves additional keys. ")
+    + (p.census ? (p.census.set === 1 ? "Account-wide" : "Character-specific") + " census. Check again in game."
+      : "Load a BC1 Census for a current-state preview. Factory defaults unavailable.");
+  $("bindingRecords").innerHTML = p.binds.map((b, i) => `<div><button class="btn" data-dropop="${i}" aria-label="Delete instruction">×</button> ${esc([b.op, b.key, b.command].filter(Boolean).join(" "))}</div>`).join("");
+  $("migrationLines").innerHTML = [...errors.map(t => ["warn", "BLOCKED: " + t]), ...lines.map(t => ["", t])].map(([c, t]) => `<li class="${c}">${esc(t)}</li>`).join("");
+  $("censusView").hidden = !p.census;
+  const rows = p.census?.rows || [];
+  $("commandList").innerHTML = rows.map(r => `<option value="${esc(r.command)}">${esc(r.label)}</option>`).join("");
+  $("censusRows").textContent = rows.map(r => [r.category, r.label, r.command, "context " + r.ctx, r.type, r.keys.join(", ") || "unbound"].join(" · ")).concat((p.census?.overrides || []).map(([k, v]) => "Override · " + k + " → " + v)).join("\n");
+}
+$("convert").onclick = () => {
+  const p = P(); p.version = 2;
+  for (const b of p.binds) b.op = "ENSURE";
+  render();
+};
+$("bindOp").onchange = renderMigration;
+$("addOp").onclick = () => {
+  const p = P(), op = p.version === 1 ? "BIND" : $("bindOp").value;
+  const command = $("opCommand").value.trim(), key = graphKey($("opKey").value.trim());
+  if (!command || (op !== "ALLOWORPHAN" && !key)) { $("opMsg").textContent = "Enter the command and its key."; return; }
+  p.binds.push({op, command, key: op === "ALLOWORPHAN" ? undefined : key});
+  $("opMsg").textContent = ""; render();
+};
+$("bindingRecords").onclick = e => {
+  const index = e.target.dataset.dropop;
+  if (index !== undefined) { P().binds.splice(Number(index), 1); render(); }
+};
+
 function renderExport() {
+  renderMigration();
   $("out").value = serialize();
   const p = P();
   const nSlots = Object.values(p.slots).filter((s) => s.kind === "clear" || s.value).length;
-  $("stats").textContent = `${CLASS_NAME[app.cls]} · ${nSlots} buttons · ${p.macros.filter((m) => m.name).length} macros · ${Object.values(p.binds).filter(Boolean).length} keys`;
+  $("stats").textContent = `${CLASS_NAME[app.cls]} · ${nSlots} buttons · ${p.macros.filter((m) => m.name).length} macros · ${p.binds.length} binding instructions`;
   $("warnings").innerHTML = warnings().map(([c, t]) => `<li class="${c}">${esc(t)}</li>`).join("");
 }
 
@@ -1015,8 +1145,8 @@ function examplePlan() {
     ["spell", "Mana Spring Totem"], ["spell", "Earthbind Totem"], ["spell", "Tremor Totem"], ["spell", "Grounding Totem"], ["spell", "Windfury Totem"], ["spell", "Fire Nova"]]);
   put("b3", [["spell", "Ghost Wolf"], ["spell", "Rockbiter Weapon"], ["spell", "Flametongue Weapon"], ["spell", "Windfury Weapon"], ["spell", "Cure Poison"],
     ["spell", "Cure Disease"], ["spell", "Water Walking"], ["spell", "Ancestral Spirit"], ["spell", "Astral Recall"], ["item", "Hearthstone"], ["spell", "Find Treasure"], ["spell", "First Aid"]]);
-  ["SHIFT-1", "SHIFT-2", "SHIFT-3", "SHIFT-4", "SHIFT-5", "SHIFT-6", "SHIFT-Q", "SHIFT-E", "BUTTON4", "BUTTON5"].forEach((k, i) => { s.binds["MULTIACTIONBAR1BUTTON" + (i + 1)] = k; });
-  ["CTRL-Q", "CTRL-1", "CTRL-2", "CTRL-3", "CTRL-4", "CTRL-5"].forEach((k, i) => { s.binds["MULTIACTIONBAR2BUTTON" + (i + 1)] = k; });
+  ["SHIFT-1", "SHIFT-2", "SHIFT-3", "SHIFT-4", "SHIFT-5", "SHIFT-6", "SHIFT-Q", "SHIFT-E", "BUTTON4", "BUTTON5"].forEach((k, i) => { s.binds.push({op: "ENSURE", command: "MULTIACTIONBAR1BUTTON" + (i + 1), key: k}); });
+  ["CTRL-Q", "CTRL-1", "CTRL-2", "CTRL-3", "CTRL-4", "CTRL-5"].forEach((k, i) => { s.binds.push({op: "ENSURE", command: "MULTIACTIONBAR2BUTTON" + (i + 1), key: k}); });
   return s;
 }
 
@@ -1243,7 +1373,7 @@ function onKeyChange(e) {
   const t = e.target;
   if (!t.classList.contains("keyin") || capture) return;
   const cmd = t.dataset.cmd, key = normalizeKey(t.value) || null;
-  const taken = key && Object.entries(P().binds).some(([c, k]) => k === key && c !== cmd);
+  const taken = key && P().binds.some(b => b.key === key && b.command !== cmd);
   setBind(cmd, key);
   t.value = key || "";
   if (taken) render(); else refresh();
@@ -1320,7 +1450,16 @@ function loadPlan(cls, plan) {
 }
 $("load").addEventListener("click", () => {
   try {
-    const r = parse($("in").value);
+    const input = $("in").value.trim();
+    if (input.startsWith("BC1:")) {
+      P().census = parseCensus(input);
+      $("in").value = "";
+      $("migration").open = true;
+      render();
+      $("loadMsg").textContent = "Current census attached to " + P().name + ".";
+      return;
+    }
+    const r = parse(input);
     const cls = r.cls || app.cls;
     if (r.race) app.race = r.race;
     const p = loadPlan(cls, r.plan);
