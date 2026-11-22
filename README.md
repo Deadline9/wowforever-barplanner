@@ -24,18 +24,24 @@ Give your assistant the [AI Action-Bar & Keybinding Design Manual](docs/AI_KEYBI
 
 ## Character profiles and leveling
 
-Each character starts with **Default**. Barsmith identifies the character by GUID and displays its name and realm. In `/barsmith`, type a name in the profile field and choose **Save new** to save the plan in the editor. **Duplicate** copies the active profile's saved plan and overwrite preference. **Rename** changes its name. The arrows select a saved profile. **Delete** asks for confirmation and keeps at least one profile per character. Saving, duplicating and selecting profiles do not execute their plans. Check and Apply a new draft before Auto-fill can use it.
+**Select profile** lists the logged-in character's layouts first and marks the active one. The header reads, for example, **Seren Grey / Leveling**. Profiles belong to the character's GUID, so a rename updates the display and keeps the layouts. Each character starts with **Default**.
+
+Type a layout name and choose **Save new** to save the plan in the editor. If you leave the name field alone, Save new can use the imported plan's `NAME`. **Rename**, **Duplicate**, and **Delete** act on the current layout. Delete asks for confirmation and keeps at least one profile per character.
+
+Under **Select profile → Other characters**, choose a character and a layout to copy. Barsmith opens an independent draft on the current character, using a numbered suffix if the name already exists. The draft carries the plan and bar exclusions. Future overwrite permission starts off. Check and Apply the draft before Auto-fill can use it. A different-class plan keeps its class and spells for editing in the planner or with an AI assistant.
+
+**Managed bars...** lets you reserve a bar or form page for manual use. Clear its checkbox to exclude its action slots from Check/Apply placements, leveling updates, and Revert. Existing profiles start with every page enabled, and Barsmith still places actions only on explicit `SLOT` destinations. Changing a checkbox invalidates the current review. Bindings for buttons on that page and explicit macro definitions still follow their own plan records. Revert honors the current exclusions, even if a bar was managed when you applied the plan.
 
 | Situation | What happens |
 |---|---|
 | Check finds occupied managed slots | Summary counts immediate and future replacements separately. Details identifies each slot, its current contents and the planned action. **Apply** approves the immediate batch and rechecks it against live state. |
 | A planned spell is learned or an item arrives | With Auto-fill enabled, empty managed slots fill automatically. Only explicit `SLOT` destinations participate, including on alternate form pages. |
-| A previously unavailable action would replace an occupied slot | One prompt covers the batch. Choose **Review batch**, inspect **Details**, then **Approve batch**, or choose **Later**. **Level updates** reopens postponed replacements. A changed batch needs a fresh review. |
+| A previously unavailable action would replace an occupied slot | One prompt covers the batch. Choose **Review batch**, inspect **Details**, then **Approve batch**, or choose **Later**. **Review pending updates** reopens postponed replacements. A changed batch needs a fresh review. |
 | This profile should handle future collisions automatically | Enable **Auto-overwrite occupied managed slots for newly available actions**. Once a placement is fulfilled, later events leave occupied slots alone. Empty spell and item slots remain eligible for refill. |
 
 **Auto-fill new spells** is the existing account-wide enable switch. Its work and overwrite permission belong to the active profile on the logged-in character. Profile selection leaves WoW's binding scope alone. Check still identifies the active account-wide or character-specific set when the plan includes bindings.
 
-**Upgrading from a single saved plan.** The old `BarsmithDB.last` string identifies no character. Barsmith keeps it unassigned and preserves your Auto-fill setting. On the intended character, select the destination profile, click **Legacy**, review **Check**, then **Apply**. A successful Apply of the original string consumes the legacy copy. Loading it into the editor or logging in on a same-class alt leaves it available.
+**Upgrading from a single saved plan.** The old `BarsmithDB.last` string identifies no character. Barsmith keeps it unassigned and preserves your Auto-fill setting. On the intended character, select the destination profile, click **Import old plan**, review **Check**, then **Apply**. A successful Apply of the original string consumes the legacy copy and hides the import button. Loading it into the editor or logging in on a same-class alt leaves it available.
 
 ### Revert last Apply
 

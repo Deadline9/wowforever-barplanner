@@ -638,7 +638,7 @@ WoW keybinding guidance similarly recommends maintaining consistent functions ac
 
 Barsmith layouts can be character-specific, but WoW's underlying keybinding set may be **account-wide** or **character-specific**. The Binding Census records the active binding context, and Check/Apply operate on that active set. Never assume a binding change is isolated to the current character merely because the action-bar contents are character-specific.
 
-In the addon's profile manager, confirm the displayed character, realm and active layout before Check. Selecting a profile loads its saved plan for review. Apply approves the reviewed batch in the current WoW binding set. A character may have separate leveling and healing profiles with different future-slot overwrite preferences.
+In the addon's profile manager, confirm the displayed character and active layout before Check. The profile’s Managed bars settings can exclude action slots independently of binding instructions. Selecting a profile loads its saved plan for review. Apply approves the reviewed batch in the current WoW binding set. A character may have separate leveling and healing profiles with different future-slot overwrite preferences.
 
 For a player setting up multiple characters, prefer a layered model:
 
