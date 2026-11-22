@@ -1,13 +1,13 @@
 -- Run at the repository root with lua or texlua. Exercise the real Check/Apply entry point.
 local owners, registry, overrides, scope, writes, saves, rejected, output, clears, slotEdits
-local summary, full, details
+local summary, full, details, emptied
 local unpack = table.unpack or unpack
 local failures, passed = 0, 0
 local function test(name, fn)
     owners = { R = "RUN", NUMLOCK = "RUN", B = "PACK", ["SHIFT-B"] = "ALLBAGS", F13 = "ADDON" }
     registry = { "RUN", "PACK", "BUTTON", "ALLBAGS", "ADDON", "UNBOUND" }
     overrides, scope, writes, saves, rejected, output, clears, slotEdits = {}, 2, {}, 0, nil, {}, 0, 0
-    BarsmithDB, summary, full, details = {}, {}, {}, {}
+    BarsmithDB, summary, full, details, emptied = {}, {}, {}, {}, {}
     local ok, err = pcall(fn)
     if ok then passed = passed + 1 else failures = failures + 1; print(name, err) end
 end
@@ -36,13 +36,19 @@ GetNumMacros = function() return 0, 0 end
 UnitClass = function() return "Mage", "MAGE" end
 InCombatLockdown = function() return false end
 ClearCursor = function() clears = clears + 1 end
-GetActionInfo = function() return "spell", 100 end
-HasAction = function() return true end
-PickupAction = function() slotEdits = slotEdits + 1 end
+GetActionInfo = function(slot) if not emptied[slot] then return "spell", 100 end end
+HasAction = function(slot) return not emptied[slot] end
+PickupAction = function(slot) emptied[slot] = true; slotEdits = slotEdits + 1 end
+UnitGUID = function() return "Player-1" end
+UnitName = function() return "Tester" end
+GetRealmName = function() return "Realm" end
+IsPlayerSpell = function(id) return id == 100 end
 SlashCmdList = {}
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, line) output[#output+1] = line end }
 
 dofile("addon/Barsmith/Bindings.lua")
+dofile("addon/Barsmith/Profiles.lua")
+dofile("addon/Barsmith/Changes.lua")
 dofile("addon/Barsmith/Barsmith.lua")
 local BP = Barsmith
 local function run(records, version)
@@ -65,7 +71,7 @@ end)
 test("2 orphan warns before intentional changes", function()
     run("SLOT\t1\tclear\t\nENSURE\tB\tBUTTON")()
     says("Warning: PACK will be unbound: B to BUTTON.")
-    assert(owners.B == "BUTTON" and #writes == 1 and slotEdits == 1 and BarsmithDB.last)
+    assert(owners.B == "BUTTON" and #writes == 1 and slotEdits == 1 and BP.profiles.active().text)
 end)
 test("3 safe displacement", function()
     owners["CTRL-B"] = "PACK"
@@ -123,13 +129,13 @@ test("changed account scope", function()
     local apply = run("ENSURE\tX\tPACK")
     scope = 1
     apply()
-    assert(#writes == 0 and not BarsmithDB.last)
+    assert(#writes == 0 and not BP.profiles.active().text)
 end)
 test("stale census", function()
     local apply = run("ENSURE\tX\tPACK")
     owners.X = "ADDON"
     apply()
-    assert(#writes == 0 and not BarsmithDB.last)
+    assert(#writes == 0 and not BP.profiles.active().text)
 end)
 test("failed write rolls back before slots", function()
     rejected = "Y"
@@ -168,7 +174,7 @@ test("slot dry run reports skipped stale and cleared actions", function()
     says("spell 100 -> keep current (skipped Future Spell)")
     says("spell 100 -> empty")
     local _, mentions = table.concat(details):gsub("Future Spell", "")
-    assert(mentions == 1)
+    assert(mentions == 2) -- skipped now and named in the future replacement
     assert(slotEdits == 0)
 end)
 test("explicit last removal is intentional", function()
@@ -286,7 +292,7 @@ test("changing a runtime override after Check invalidates Apply", function()
     says("Run Check again.")
     apply()
     says("Run Check before Apply.")
-    assert(#writes == 0 and not BarsmithDB.last)
+    assert(#writes == 0 and not BP.profiles.active().text)
 end)
 for version = 1, 2 do
     test("BP" .. version .. " places learned names missing from the book and keeps explicit ranks", function()
@@ -336,7 +342,7 @@ for version = 1, 2 do
         says("4 slot changes, 3 skipped")
         assert(#pickups == 4 and slots[1] == 701 and slots[2] == 702 and slots[3] == 702 and slots[4] == 703)
         assert(not slots[5] and not slots[6] and not slots[7])
-        assert(BP.parse(BarsmithDB.last).slots[1].value == "Find Herbs")
+        assert(BP.parse(BP.profiles.active().text).slots[1].value == "Find Herbs")
     end)
 end
 test("setup export round-trips exact slot IDs", function()
@@ -375,18 +381,19 @@ test("setup export round-trips exact slot IDs", function()
     assert(#changes == 1 and changes[1] == "No changes or warnings.")
     local lines = table.concat(report, "\n")
     assert(lines:find("0 to fill, 0 to clear, 8 already right", 1, true), lines)
-    assert(lines:find("0 to change, 8 already right", 1, true), lines)
-    assert(lines:find("[1]: spell 301 -> already correct", 1, true))
-    assert(lines:find("[109, compatibility copy]: spell 301 -> already correct", 1, true))
+    assert(not lines:find("compatibility copy", 1, true), lines)
+    assert(lines:find("[1]: Feral Charge (Cat) (spell 301) -> already correct", 1, true))
+    assert(not lines:find("[109", 1, true))
     assert(not lines:find("skipped") and #output == 1)
     BP.run(text, false)
-    assert(BarsmithDB.last == text and slotEdits == 0)
+    assert(BP.profiles.active().text == text and slotEdits == 0)
 
     -- The very same unknown ID must still skip on a different slot.
     local _, other = BP.run(BP.serialize({ slots = {{slot = 12, kind = "spell", value = "spell:302"}} }), true)
     assert(table.concat(other):find("skipped spell:302", 1, true))
     GetActionInfo, HasAction, UnitClass = getAction, hasAction, getClass
-    UnitName, C_Item, C_Spell, IsPlayerSpell = nil, nil, nil, nil
+    C_Item, C_Spell = nil, nil
+    IsPlayerSpell = function(id) return id == 100 end
     GetNumSpellTabs, GetSpellTabInfo, GetSpellBookItemName, GetSpellBookItemInfo = nil, nil, nil, nil
 end)
 test("real frame gates Apply, switches reports, and invalidates edits immediately", function()

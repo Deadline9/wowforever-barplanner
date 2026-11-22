@@ -250,7 +250,7 @@ function B.commit(plan, p)
         return nil, "Bindings changed or Check is blocked. Run Check again."
     end
     if #p.changes == 0 then return true end
-    local attempted, saving = {}, false
+    local attempted, saving, after = {}, false, nil
     local function write(key, command)
         assert(SetBinding(key, command) and owner(key, false) == command, "Game rejected " .. key)
     end
@@ -260,12 +260,12 @@ function B.commit(plan, p)
             attempted[#attempted + 1] = c
             write(c.key, c.new)
         end
-        local after = B.capture(plan.binds, s.rows)
+        after = B.capture(plan.binds, s.rows)
         assert(after.set == s.set and sameMap(after.owners, p.final), "Binding verification failed")
         saving = true
         assert(SaveBindings(s.set) ~= false, "Save failed")
     end)
-    if ok then return true end
+    if ok then return true, nil, after end
     local restored = GetCurrentBindingSet() == s.set
     if restored then
         for i = #attempted, 1, -1 do

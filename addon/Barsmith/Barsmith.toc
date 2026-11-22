@@ -7,4 +7,6 @@
 ## X-Curse-Project-ID: 1778365
 
 Bindings.lua
+Profiles.lua
+Changes.lua
 Barsmith.lua

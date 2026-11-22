@@ -8,10 +8,9 @@
 -- EllesmereUI, Bartender4, Dominos and ElvUI show the game's normal action slots
 -- and pass the game's normal button bindings (ACTIONBUTTON1, MULTIACTIONBAR1BUTTON1, ...)
 -- on to their own buttons, so whatever this addon sets shows up on those bars.
--- Some of them switch the main bar in forms where the game doesn't; see COPY_PAGES.
+-- Some of them switch the main bar in forms where the game doesn't; see ALTERNATE_PAGES.
 --
--- The last applied plan is kept in BarsmithDB. With auto-fill on (the default),
--- a spell you learn or an item you get later goes into its planned slot if that slot is empty.
+-- Character profiles and their pending leveling placements are kept in BarsmithDB.
 
 Barsmith = Barsmith or {}
 local BP = Barsmith
@@ -41,38 +40,12 @@ local PAGES = {
     { first = 13,  label = "Bar 1 page 2" }, -- Shift+2; pages 3-6 are bars 4, 5, 3 and 2
 }
 
--- Main bar pages some bar addons switch to although Forever's own bars don't. Apply fills each with
--- a copy of the page the game shows in that form, so the main bar looks the same either way.
--- The game never shows these slots, so the copies don't change anything without such an addon.
---   Shadowform:   Dominos and ElvUI switch to 73-84; the game keeps the normal main bar.
---   Moonkin Form: Dominos switches to 109-120; the game keeps the normal main bar.
---   Prowl:        Bartender4 and ElvUI switch to 85-96; the game keeps the Cat Form page (73-84).
-local COPY_PAGES = {
-    PRIEST = { { from = 1, to = 73, label = "Shadowform" } },
-    DRUID = { { from = 1, to = 109, label = "Moonkin Form" }, { from = 73, to = 85, label = "Prowl" } },
+-- The browser has no selectable page for these addon-specific forms. Export
+-- their buttons when an applied profile explicitly manages those destinations.
+local ALTERNATE_PAGES = {
+    PRIEST = { [73] = true }, -- Shadowform
+    DRUID = { [109] = true, [85] = true }, -- Moonkin and Prowl
 }
-
-local function copyPagesFor(class)
-    return COPY_PAGES[class] or {}
-end
-
--- The plan's slots plus their copies (marked copy = true). A slot the plan sets itself is never overwritten.
-local function slotsWithCopies(plan, class)
-    local list, bySlot = {}, {}
-    for _, s in ipairs(plan.slots) do
-        list[#list + 1] = s
-        bySlot[s.slot] = s
-    end
-    for _, c in ipairs(copyPagesFor(class)) do
-        for i = 0, 11 do
-            local s = bySlot[c.from + i]
-            if s and not bySlot[c.to + i] then
-                list[#list + 1] = { slot = c.to + i, kind = s.kind, value = s.value, copy = true }
-            end
-        end
-    end
-    return list
-end
 
 -- Non-bar commands the planner offers under "Other keybinds".
 local OTHER_COMMANDS = {
@@ -436,201 +409,183 @@ local function resolveItem(value)
     return { kind = "item", id = id, pickup = function() pickupItem(id) end }
 end
 
--- The game allows 16-character macro names. If it cut a longer one, find it by
--- the cut name so a second Apply doesn't make a duplicate.
 local MACRO_NAME_MAX = 16
-local function macroIndex(name)
-    local idx = GetMacroIndexByName(name)
-    if idx and idx > 0 then return idx end
-    local chars = name:match(("[%z\1-\127\194-\244][\128-\191]*"):rep(MACRO_NAME_MAX))
-    for _, cut in ipairs({ cutBytes(name, MACRO_NAME_MAX), chars }) do
-        if cut and cut ~= name then
-            idx = GetMacroIndexByName(cut)
-            if idx and idx > 0 then return idx end
+local C, P = BP.changes, BP.profiles
+
+local function spellKnown(id)
+    return isKnownSpell(id)
+        or (C_SpellBook and C_SpellBook.IsSpellKnownOrInSpellBook and C_SpellBook.IsSpellKnownOrInSpellBook(id))
+        or (IsSpellKnownOrOverridesKnown and IsSpellKnownOrOverridesKnown(id))
+end
+
+function C.pickup(action)
+    if action.kind == "spell" then
+        if spellKnown(action.id) then return function() pickupSpellID(action.id) end end
+        for _, entry in ipairs(spellbookEntries()) do
+            if entry.spellID == action.id then return function() pickupBookEntry(entry) end end
+        end
+    elseif action.kind == "item" and haveItem(action.id) then
+        return function() pickupItem(action.id) end
+    elseif action.kind == "macro" then
+        local macro = C.macro(action.name)
+        if macro and macro.perChar == action.perChar then
+            return function() PickupMacro(GetMacroIndexByName(action.name)) end
         end
     end
-    return 0
 end
 
-local function resolveMacro(value)
-    local idx = macroIndex(value)
-    if not idx or idx == 0 then return nil, "no macro with that name" end
-    return { kind = "macro", id = idx, pickup = function() PickupMacro(idx) end }
+local function label(action)
+    if action.kind == "empty" then return "empty" end
+    if action.kind == "macro" then return "macro " .. action.name end
+    local name
+    if action.kind == "spell" then name = getSpellName(action.id)
+    elseif action.kind == "item" then name = getItemName(action.id) end
+    local id = action.kind .. " " .. tostring(action.id)
+    return name and (name .. " (" .. id .. ")") or id
 end
 
-local function slotHolds(slot, target)
-    local kind, id = GetActionInfo(slot)
-    return kind == target.kind and id == target.id
+local function available(s, book)
+    if s.kind == "spell" then return resolveSpell(s.value, book) end
+    if s.kind == "item" then return resolveItem(s.value) end
 end
 
-local function placeTarget(slot, target)
-    ClearCursor()
-    target.pickup()
-    if not GetCursorInfo() then return false end
-    PlaceAction(slot)
-    ClearCursor()
-    return HasAction(slot)
+local function requireRestorable(slot, before)
+    assert(before.kind == "empty" or C.pickup(before),
+        slotLabel(slot) .. ": cannot restore " .. label(before) .. ". Move it manually before continuing.")
 end
 
-------------------------------------------------------------------------
--- Applying a plan
-------------------------------------------------------------------------
-
-local function applyMacros(plan, dry, r)
-    local nAccount, nChar = GetNumMacros()
-    local maxAccount = MAX_ACCOUNT_MACROS or 120
-    local maxChar = MAX_CHARACTER_MACROS or 18
-    for _, m in ipairs(plan.macros) do
-        -- The game refuses a longer body instead of cutting it, so cut it here.
-        local body = cutBytes(m.body, MACRO_BODY_MAX)
-        if body ~= m.body then
-            r.problems[#r.problems + 1] = ("Macro %s is %d characters; only the first %d are kept.")
-                :format(m.name, #m.body, MACRO_BODY_MAX)
-        end
-        local icon = tonumber(m.icon) or (m.icon ~= "" and m.icon) or nil
-        local idx = macroIndex(m.name)
-        if idx and idx > 0 then
-            local _, oldIcon, oldBody = GetMacroInfo(idx)
-            if trim(oldBody) == trim(body) then
-                r.macrosSame = r.macrosSame + 1
-            else
-                local ok, res = true, nil
-                if not dry then ok, res = pcall(EditMacro, idx, m.name, icon or oldIcon, body) end
-                if ok then
-                    r.macrosChanged = r.macrosChanged + 1
-                else
-                    r.problems[#r.problems + 1] = "Macro " .. m.name .. ": couldn't change it (" .. tostring(res) .. ")."
-                end
-            end
-        elseif m.perChar and nChar >= maxChar then
-            r.problems[#r.problems + 1] = "Macro " .. m.name .. ": character macros are full (" .. maxChar .. ")."
-        elseif not m.perChar and nAccount >= maxAccount then
-            r.problems[#r.problems + 1] = "Macro " .. m.name .. ": general macros are full (" .. maxAccount .. ")."
+-- Older hand-authored plans sometimes clear a stale slot before reserving it
+-- for a future spell. Review that pair as one physical change.
+local function managedSlots(plan)
+    local slots, bySlot, clearFirst = {}, {}, {}
+    for _, s in ipairs(plan.slots) do
+        assert(s.slot >= 1 and s.slot <= 180 and s.slot == math.floor(s.slot), "Invalid slot: " .. s.slot)
+        local i = bySlot[s.slot]
+        if not i then
+            table.insert(slots, s)
+            bySlot[s.slot] = #slots
+        elseif slots[i].kind == "clear" or s.kind == "clear" then
+            clearFirst[s.slot] = slots[i].kind == "clear"
+            slots[i] = s
         else
-            local ok, res = true, true
-            if not dry then ok, res = pcall(CreateMacro, m.name, icon or DEFAULT_ICON, body, m.perChar) end
-            if ok and res then
-                r.macrosNew = r.macrosNew + 1
-                if m.perChar then nChar = nChar + 1 else nAccount = nAccount + 1 end
-            else
-                r.problems[#r.problems + 1] = "Macro " .. m.name .. ": couldn't create it (" .. tostring(res) .. ")."
-            end
+            assert(C.equal(slots[i], s), "Competing actions for " .. slotLabel(s.slot))
         end
     end
+    return slots, clearFirst
 end
 
-local function applySlots(plan, dry, r)
-    local planMacros = {}
-    for _, m in ipairs(plan.macros) do planMacros[m.name:lower()] = true end
-    local book = spellbookEntries()
-    local _, class = UnitClass("player")
-    for _, s in ipairs(slotsWithCopies(plan, class)) do
-        local label = slotLabel(s.slot)
-        local function detail(action, alreadyCorrect)
-            if not dry then return end
-            local kind, id = GetActionInfo(s.slot)
-            local current = kind and (kind .. " " .. tostring(id)) or "empty"
-            local msg = ("%s [%d%s]: %s -> %s"):format(
-                label, s.slot, s.copy and ", compatibility copy" or "", current, action)
-            r.slotDetails[#r.slotDetails + 1] = msg
-            if not alreadyCorrect then r.slotChanges[#r.slotChanges + 1] = msg end
-        end
-        -- An installed action can outlive its spellbook entry or inventory item.
-        -- Its exact ID proves a no-op only on this slot, never on another slot.
-        local kind, id = GetActionInfo(s.slot)
-        local exact = (kind == "spell" or kind == "item") and id and s.kind == kind and s.value == kind .. ":" .. id
-        if exact then
-            detail("already correct", true)
-            if s.copy then r.copiedSame = r.copiedSame + 1 else r.same = r.same + 1 end
-        elseif s.copy then
-            -- Copies are counted on their own; anything wrong with them is already reported for the original.
-            local target, why
-            if s.kind == "spell" then target, why = resolveSpell(s.value, book)
-            elseif s.kind == "macro" then
-                target, why = resolveMacro(s.value)
-                if not target and dry and planMacros[s.value:lower()] then target = { kind = "macro", id = -1 } end
-            elseif s.kind == "item" then target = resolveItem(s.value, s.slot)
-            end
-            if s.kind == "clear" then
-                if HasAction(s.slot) then
-                    detail("empty")
-                    if not dry then PickupAction(s.slot); ClearCursor() end
-                    r.copied = r.copied + 1
-                end
-            elseif target and slotHolds(s.slot, target) then
-                detail("already correct", true)
-                r.copiedSame = r.copiedSame + 1
-            elseif target and (dry or placeTarget(s.slot, target)) then
-                detail(s.kind .. " " .. s.value)
-                r.copied = r.copied + 1
-            elseif not target and s.kind ~= "clear" then
-                detail("keep current (skipped " .. s.value .. "): " .. (why or "unknown slot type"))
-                r.copiesSkipped = r.copiesSkipped + 1
-            elseif target then
-                r.problems[#r.problems + 1] = label .. ": couldn't place the copy of " .. s.value .. "."
-            end
-        elseif s.kind == "clear" then
-            if HasAction(s.slot) then
-                detail("empty")
-                if not dry then PickupAction(s.slot); ClearCursor() end
-                r.cleared = r.cleared + 1
-            end
-        else
-            local target, why
-            if s.kind == "spell" then
-                target, why = resolveSpell(s.value, book)
-            elseif s.kind == "macro" then
-                target, why = resolveMacro(s.value)
-                if not target and dry and planMacros[s.value:lower()] then
-                    target = { kind = "macro", id = -1 } -- created by Apply
-                end
-            elseif s.kind == "item" then
-                target, why = resolveItem(s.value, s.slot)
-            else
-                why = "unknown slot type " .. tostring(s.kind)
-            end
-            if not target then detail("keep current (skipped " .. s.value .. "): " .. tostring(why)) end
-            if not target and why == "not learned yet" then
-                r.notLearned[#r.notLearned + 1] = s.value
-            elseif not target and why == "not in bags" then
-                local id = tonumber(s.value:match("^item:(%d+)"))
-                r.notInBags[#r.notInBags + 1] = (id and getItemName(id)) or s.value
-            elseif not target then
-                r.skipped[#r.skipped + 1] = label .. ": " .. s.value .. " (" .. why .. ")"
-            elseif slotHolds(s.slot, target) then
-                detail("already correct", true)
-                r.same = r.same + 1
-            elseif dry then
-                detail(s.kind .. " " .. s.value)
-                r.placed = r.placed + 1
-            elseif placeTarget(s.slot, target) then
-                r.placed = r.placed + 1
-            else
-                r.problems[#r.problems + 1] = label .. ": couldn't place " .. s.value .. "."
-            end
-        end
-    end
+local function macroName(value)
+    if #value <= MACRO_NAME_MAX then return value end
+    -- Existing clients may have kept sixteen multibyte characters, or cut at
+    -- sixteen bytes. Match either existing spelling before creating a macro.
+    local existing = C.macro(value)
+    if existing then return existing.name end
+    local chars = value:match(("[%z\1-\127\194-\244][\128-\191]*"):rep(MACRO_NAME_MAX))
+    existing = chars and C.macro(chars)
+    return existing and existing.name or cutBytes(value, MACRO_NAME_MAX)
 end
 
-function BP.apply(plan, dry, preview)
+local function reviewPlan(plan, preview)
     local r = {
+        binding = preview, bound = preview and #preview.changes or 0, bindsSame = preview and preview.same or 0,
         placed = 0, same = 0, cleared = 0, macrosNew = 0, macrosChanged = 0, macrosSame = 0,
-        bound = 0, bindsSame = 0, notLearned = {}, notInBags = {}, skipped = {}, problems = {},
-        copied = 0, copiedSame = 0, copiesSkipped = 0, slotDetails = {}, slotChanges = {},
+        notLearned = {}, notInBags = {}, skipped = {}, problems = {}, slotDetails = {}, slotChanges = {},
+        ops = {}, pending = {}, inspected = {}, overwrites = 0, futureOverwrites = 0,
     }
-    if #plan.binds > 0 then
-        if not preview then return nil, "Run Check on this plan before Apply." end
-        r.binding = preview
-        r.bound, r.bindsSame = #preview.changes, preview.same
-        if not dry then
-            local ok, err = B.commit(plan, preview)
-            if not ok then return nil, err end
+    local pickups, macros = {}, {}
+    local account, character = GetNumMacros()
+    for _, m in ipairs(plan.macros) do
+        local name = macroName(m.name)
+        local key = name:lower()
+        assert(not macros[key], "Duplicate macro: " .. name)
+        local before = C.macro(name)
+        local body = cutBytes(m.body, MACRO_BODY_MAX)
+        if body ~= m.body then table.insert(r.problems, "Macro " .. name .. " will be shortened to 255 bytes.") end
+        local after = { name = before and before.name or name, body = body,
+            icon = tonumber(m.icon) or (m.icon ~= "" and m.icon) or (before and before.icon) or DEFAULT_ICON,
+            perChar = m.perChar }
+        if before then after.perChar = before.perChar end
+        macros[key] = after
+        table.insert(r.inspected, { macro = name, before = before })
+        if before and trim(before.body) == trim(body) then
+            r.macrosSame = r.macrosSame + 1
+        else
+            table.insert(r.ops, { name = name, before = before, after = after })
+            if before then
+                r.macrosChanged = r.macrosChanged + 1
+            else
+                if after.perChar then character = character + 1 else account = account + 1 end
+                assert(character <= (MAX_CHARACTER_MACROS or 18) and account <= (MAX_ACCOUNT_MACROS or 120),
+                    "Macro storage is full for " .. name)
+                r.macrosNew = r.macrosNew + 1
+            end
         end
     end
-    applyMacros(plan, dry, r)
-    applySlots(plan, dry, r)
-    if not dry and #plan.slots > 0 then ClearCursor() end
-    return r
+    local book = spellbookEntries()
+    local slots, clearFirst = managedSlots(plan)
+    for _, s in ipairs(slots) do
+        local before = C.slot(s.slot)
+        local after, pickup, why
+        if s.kind == "clear" then
+            after = { kind = "empty" }
+        elseif s.kind == "macro" then
+            local name = macroName(s.value)
+            local m = macros[name:lower()] or C.macro(name)
+            if m then
+                after = { kind = "macro", name = m.name, perChar = m.perChar }
+            else why = "no macro with that name" end
+        elseif s.kind == "spell" or s.kind == "item" then
+            if before.kind == s.kind and s.value == s.kind .. ":" .. tostring(before.id) then
+                after = before
+            else
+                local target
+                target, why = available(s, book)
+                if target then
+                    assert(target.id, "Cannot identify " .. s.value)
+                    after = { kind = s.kind, id = target.id }
+                    if before.kind == s.kind and before.id == target.id then after = before end
+                    pickup = target.pickup
+                else
+                    r.pending[s.slot] = true
+                end
+            end
+        else error("Unknown slot type: " .. tostring(s.kind)) end
+        local oldMacro = before.kind == "macro" and C.macro(before.name) or nil
+        local nextMacro = after and after.kind == "macro" and C.macro(after.name) or nil
+        table.insert(r.inspected, { slot = s.slot, before = before, after = after, oldMacro = oldMacro, nextMacro = nextMacro })
+        local description, same
+        if not after then
+            local list = why == "not learned yet" and r.notLearned or why == "not in bags" and r.notInBags or r.skipped
+            table.insert(list, s.value)
+            if clearFirst[s.slot] then
+                after = { kind = "empty" }
+                description = "empty (explicit clear; reserved for " .. s.value .. ")"
+            else
+                description = "keep current (skipped " .. s.value .. "): " .. tostring(why)
+                if r.pending[s.slot] and before.kind ~= "empty" then
+                    r.futureOverwrites = r.futureOverwrites + 1
+                    description = description .. ". Future replacement: " .. label(before) .. " -> " .. s.value
+                end
+            end
+        end
+        if after then
+            if C.equal(before, after) then
+                same, description = true, description or "already correct"
+                r.same = r.same + 1
+            else
+                requireRestorable(s.slot, before)
+                table.insert(r.ops, { slot = s.slot, before = before, after = after, previousMacro = oldMacro })
+                pickups[#r.ops] = pickup
+                if before.kind ~= "empty" then r.overwrites = r.overwrites + 1 end
+                if after.kind == "empty" then r.cleared = r.cleared + 1 else r.placed = r.placed + 1 end
+                description = description or (s.kind == "clear" and "empty" or s.kind .. " " .. s.value)
+            end
+        end
+        local line = ("%s [%d]: %s -> %s"):format(slotLabel(s.slot), s.slot, label(before), description)
+        table.insert(r.slotDetails, line)
+        if not same then table.insert(r.slotChanges, line) end
+    end
+    return r, pickups
 end
 
 local function countLabel(n, label)
@@ -658,12 +613,16 @@ local function reportLines(r, dry)
         summary[2] = ("Displaced commands: %d. Orphaned: %d. Blocking errors: %d. Runtime override warnings: %d.")
             :format(binding and binding.displaced or 0, binding and binding.orphaned or 0,
                 #errors, binding and binding.overrideWarnings or 0)
-        local slots = r.placed + r.cleared + r.copied
-        local skipped = #r.notLearned + #r.notInBags + #r.skipped + r.copiesSkipped
+        local slots = r.placed + r.cleared
+        local skipped = #r.notLearned + #r.notInBags + #r.skipped
         if slots + skipped > 0 then
             local counts = countLabel(slots, "slot change") .. ", " .. skipped .. " skipped"
             chat[1] = chat[1] .. ", " .. counts
             summary[#summary + 1] = counts
+        end
+        if r.overwrites > 0 or r.futureOverwrites > 0 then
+            highlight(("%d occupied slots will be replaced now. %d occupied slots have future replacements.")
+                :format(r.overwrites, r.futureOverwrites))
         end
         if r.macrosNew + r.macrosChanged > 0 then
             highlight(("Macros: %d new, %d changed."):format(r.macrosNew, r.macrosChanged))
@@ -691,12 +650,10 @@ local function reportLines(r, dry)
         full[#full + 1] = ("Slots: %d to fill, %d to clear, %d already right. Macros: %d new, %d changed, %d unchanged.")
             :format(r.placed, r.cleared, r.same, r.macrosNew, r.macrosChanged, r.macrosSame)
     end
-    if r.copied + r.copiedSame > 0 then
-        local _, class = UnitClass("player")
-        local names = {}
-        for _, c in ipairs(copyPagesFor(class)) do names[#names + 1] = c.label end
-        full[#full + 1] = ("Copies for bar addons that switch the main bar in %s: %d %s, %d already right.")
-            :format(table.concat(names, " and "), r.copied, dry and "to change" or "changed", r.copiedSame)
+    for _, op in ipairs(r.ops) do
+        if op.name then
+            change((op.before and "Update " or "Create ") .. (op.after.perChar and "character macro " or "account macro ") .. op.name)
+        end
     end
     if binding then
         for _, msg in ipairs(binding.lines) do change(msg) end
@@ -744,12 +701,15 @@ function BP.exportCurrent()
     local book = spellbookEntries()
     local seenMacro = {}
     local maxAccount = MAX_ACCOUNT_MACROS or 120
-    local copyPage = {} -- leave out the copies Apply made; the planner has no such pages
-    for _, c in ipairs(copyPagesFor(class)) do copyPage[c.to] = true end
+    local profile = P.active()
+    local saved = profile and profile.pending and profile.text and BP.parse(profile.text)
+    local explicit = {}
+    if saved then for _, s in ipairs(saved.slots) do explicit[s.slot] = true end end
+    local alternate = ALTERNATE_PAGES[class] or {}
     for _, p in ipairs(PAGES) do
         for i = 0, 11 do
             local slot = p.first + i
-            if not copyPage[p.first] and HasAction(slot) then
+            if (not alternate[p.first] or explicit[slot]) and HasAction(slot) then
                 local kind, id = GetActionInfo(slot)
                 if kind == "spell" then
                     plan.slots[#plan.slots + 1] = { slot = slot, kind = kind, value = exportSpell(id, book) }
@@ -831,42 +791,181 @@ local function showStatus(summary, full, chat, details)
     return summary, full or summary, details or summary
 end
 
+-- Check, batch confirmation and Revert all bind their review to the active profile.
+local review, refreshProfiles, queueAutoFill
+local function invalidate()
+    checked, review = nil, nil
+    if frame then frame.confirm:Hide(); frame.later:Hide() end
+    refreshApply()
+end
+
+local function profileState(p)
+    local pending = p.pending and {}
+    for slot in pairs(p.pending or {}) do pending[slot] = true end
+    return { text = p.text, pending = pending }
+end
+
+local function ready()
+    assert(not InCombatLockdown(), "Can't change bars or keys in combat.")
+    assert(not (GetCursorInfo and GetCursorInfo()), "Empty the cursor and try again.")
+end
+
 function BP.run(text, dry)
     local previous = checked
-    checked = nil
-    refreshApply()
+    invalidate()
     local function stop(msg)
         local title = dry and "Check BLOCKED" or "Apply stopped"
         return showStatus({ title .. ": " .. msg }, nil, { title .. ": " .. msg .. "  Open Details for the full report." })
     end
-    if InCombatLockdown() then return stop("Can't change bars or keys in combat. Try again after the fight.") end
-    if not dry and (not previous or previous.text ~= text) then return stop(CHECK_HINT) end
+    local profile = P.active()
+    if not profile then return stop("Character identity unavailable.") end
+    if not dry and (not previous or previous.text ~= text or previous.profile ~= profile) then return stop(CHECK_HINT) end
     local plan, err = BP.parse(text)
     if not plan then return stop(err) end
-    local _, myClass = UnitClass("player")
-    if plan.class and myClass and plan.class ~= myClass then
-        return stop(("This plan is for a %s and this character is a %s. Switch class in the planner and copy that plan.")
-            :format(plan.class:lower(), myClass:lower()))
+    local _, class = UnitClass("player")
+    if plan.class and plan.class ~= class then return stop("This plan is for a different class: " .. plan.class) end
+    local ok, result = pcall(function()
+        ready()
+        local preview = previous and not dry and previous.preview or nil
+        if dry and #plan.binds > 0 then
+            preview = B.preview(plan, B.capture(plan.binds))
+            preview.legacy = plan.version == 1
+        end
+        local r, pickups = reviewPlan(plan, preview)
+        local state = profileState(profile)
+        if dry then
+            if not preview or #preview.errors == 0 then
+                checked = { text = text, profile = profile, state = state, inspected = r.inspected, preview = preview }
+            end
+        else
+            assert(C.equal(previous.inspected, r.inspected) and C.equal(previous.state, state),
+                "Slots, macros, available actions or the profile changed. Run Check again.")
+            local snapshot = { before = state, ops = r.ops, text = trim(text), visit = BarsmithDB.characterVisit }
+            snapshot.bindings = C.execute(r.ops, plan, preview, pickups)
+            profile.text, profile.pending = snapshot.text, r.pending
+            if #r.ops > 0 or snapshot.bindings or not C.equal(state, profileState(profile)) then
+                profile.undo = snapshot
+            end
+            if BarsmithDB.legacyPlan == profile.text then BarsmithDB.legacyPlan = nil end
+        end
+        return r
+    end)
+    if not ok then return stop(tostring(result)) end
+    if not dry and frame then refreshProfiles() end
+    return showStatus(reportLines(result, dry))
+end
+
+local function showReview(kind, title, lines, ticket)
+    invalidate()
+    review = ticket
+    review.kind = kind
+    if frame then
+        frame.confirm:SetText(kind == "revert" and "Confirm revert" or kind == "delete" and "Delete profile" or "Approve batch")
+        frame.confirm:Show()
+        frame.later:Show()
     end
-    local preview
-    if dry and #plan.binds > 0 then
-        local ok, result = pcall(function() return B.preview(plan, B.capture(plan.binds)) end)
-        if not ok then return stop(tostring(result)) end
-        preview = result
-        preview.legacy = plan.version == 1
-    elseif previous and not dry then
-        preview = previous.preview
+    return showStatus({ title }, lines, { title }, lines)
+end
+
+local function macroInUse(name, ops)
+    local changing = {}
+    for _, op in ipairs(ops) do
+        if op.slot then changing[op.slot] = true end
     end
-    local ok, r, failure = pcall(BP.apply, plan, dry, preview)
-    if not ok or not r then return stop(tostring(failure or r)) end
-    if dry and (not preview or #preview.errors == 0) then checked = { text = text, preview = preview } end
-    if not dry then BarsmithDB.last = trim(text) end
-    return showStatus(reportLines(r, dry))
+    for slot = 1, math.max(MAX_ACTION_BUTTONS or 0, 180) do
+        local kind, index = GetActionInfo(slot)
+        if kind == "macro" and GetMacroInfo(index) == name and not changing[slot] then
+            return "Macro " .. name .. " is now used on " .. slotLabel(slot)
+        end
+    end
+end
+
+local function revertPlan(profile)
+    ready()
+    local u = assert(profile.undo, "This profile has no Apply to revert.")
+    assert(profile.text == u.text, "Profile plan changed since Apply.")
+    local ops, lines, editedMacros = {}, {}, {}
+    for _, op in ipairs(u.ops) do if op.name then editedMacros[op.name:lower()] = true end end
+    for i = #u.ops, 1, -1 do
+        local op = u.ops[i]
+        local where = op.name or slotLabel(op.slot)
+        assert(C.equal(C.read(op), op.after), where .. " changed since Apply.")
+        if op.slot then
+            requireRestorable(op.slot, op.before)
+            if op.previousMacro and not editedMacros[op.previousMacro.name:lower()] then
+                assert(C.equal(C.macro(op.previousMacro.name), op.previousMacro),
+                    "Previous slot macro changed: " .. op.previousMacro.name)
+            end
+            table.insert(lines, where .. ": " .. label(op.after) .. " -> " .. label(op.before))
+        else
+            if not op.before then
+                assert(op.after.perChar or u.visit == BarsmithDB.characterVisit,
+                    "Cannot verify other characters' uses of new account macro " .. op.name .. " after switching characters.")
+                local used = macroInUse(op.name, u.ops)
+                assert(not used, used)
+                -- A new key bound directly to this macro would lose its action.
+                local cmd = "MACRO " .. op.name
+                local bound = B.capture({}, { [cmd] = true }).rows[cmd].keys
+                local moving = {}
+                if u.bindings then
+                    for _, b in ipairs(u.bindings.plan.binds) do moving[b.key] = true end
+                end
+                for key in pairs(bound) do
+                    assert(moving[key],
+                        "Macro now has a binding on " .. key)
+                end
+            end
+            table.insert(lines, op.before and ("Restore macro " .. op.name .. ":\n" .. op.before.body)
+                or ("Delete macro " .. op.name .. " created by Apply."))
+        end
+        table.insert(ops, { slot = op.slot, name = op.name, before = op.after, after = op.before })
+    end
+    local preview = C.reverseBindings(u.bindings)
+    if preview then
+        table.insert(lines, preview.before.set == 1 and "Account-wide bindings" or "Character-specific bindings")
+        for _, msg in ipairs(preview.lines) do table.insert(lines, msg) end
+        for _, msg in ipairs(preview.warnings) do table.insert(lines, msg) end
+    end
+    table.insert(lines, "Restore this profile's previous saved plan and pending leveling placements.")
+    return ops, preview, lines
+end
+
+function BP.revert(confirm)
+    local previous = review
+    invalidate()
+    local profile = P.active()
+    local ok, result = pcall(function()
+        assert(profile, "Character identity unavailable.")
+        if confirm then
+            assert(previous and previous.kind == "revert" and previous.profile == profile and previous.undo == profile.undo,
+                "Preview Revert again.")
+        end
+        local ops, preview, lines = revertPlan(profile)
+        if not confirm then
+            return showReview("revert", "Revert last Apply? Open Details to review the batch.", lines,
+                { profile = profile, undo = profile.undo, preview = preview })
+        end
+        local u = profile.undo
+        C.execute(ops, u.bindings and u.bindings.plan, previous.preview)
+        profile.text, profile.pending, profile.undo = u.before.text, u.before.pending, nil
+        if frame then frame.edit:SetText(profile.text or "") end
+        return showStatus({ "Reverted the last Apply for this profile." })
+    end)
+    if not ok then return showStatus({ "Revert stopped: " .. tostring(result) }) end
+    return result
+end
+
+local function setAuto(enabled)
+    BarsmithDB.auto = enabled
+    invalidate()
+    if frame then frame.auto:SetChecked(enabled) end
+    if enabled then queueAutoFill()
+    elseif StaticPopup_Hide then StaticPopup_Hide("BARSMITH_LEVEL_UPDATES") end
 end
 
 local function buildFrame()
     local f = CreateFrame("Frame", "BarsmithFrame", UIParent, "BasicFrameTemplateWithInset")
-    f:SetSize(620, 470)
+    f:SetSize(620, 558)
     f:SetPoint("CENTER")
     f:SetFrameStrata("DIALOG")
     f:SetClampedToScreen(true)
@@ -882,14 +981,14 @@ local function buildFrame()
     title:SetText("Barsmith")
 
     local help = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    help:SetPoint("TOPLEFT", 16, -34)
-    help:SetPoint("TOPRIGHT", -16, -34)
+    help:SetPoint("TOPLEFT", 16, -85)
+    help:SetPoint("TOPRIGHT", -16, -85)
     help:SetJustifyH("LEFT")
     help:SetText("Paste a setup plan and click Check. Review the summary before applying changes.")
 
     local scroll = CreateFrame("ScrollFrame", "BarsmithScroll", f, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 18, -56)
-    scroll:SetPoint("BOTTOMRIGHT", -38, 245)
+    scroll:SetPoint("TOPLEFT", 18, -108)
+    scroll:SetPoint("BOTTOMRIGHT", -38, 306)
 
     local bg = f:CreateTexture(nil, "BACKGROUND", nil, 1)
     bg:SetPoint("TOPLEFT", scroll, -4, 4)
@@ -911,7 +1010,7 @@ local function buildFrame()
 
     local report = CreateFrame("ScrollFrame", "BarsmithReport", f, "UIPanelScrollFrameTemplate")
     report:SetPoint("TOPLEFT", scroll, "BOTTOMLEFT", 0, -44)
-    report:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -38, 50)
+    report:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -38, 108)
     local status = CreateFrame("EditBox", nil, report)
     status:SetMultiLine(true)
     status:SetAutoFocus(false)
@@ -935,28 +1034,28 @@ local function buildFrame()
         b:SetScript("OnClick", onClick)
         return b
     end
-    f.summaryTab = button("Summary", 16, 82, function() display("summary"); refreshApply() end, 210)
-    f.detailsTab = button("Details", 102, 72, function() display("details"); refreshApply() end, 210)
+    f.summaryTab = button("Summary", 16, 82, function() display("summary"); refreshApply() end, 271)
+    f.detailsTab = button("Details", 102, 72, function() display("details"); refreshApply() end, 271)
     f.summaryTab:Disable()
     f.diagnosticsButton = button("Full diagnostics", 288, 124, function()
         display(f.view == "full" and "details" or "full")
         refreshApply()
-    end, 210)
+    end, 271)
     f.diagnosticsButton:Hide()
     button("Copy report", 178, 106, function()
         display(f.view == "full" and "full" or "details")
         status:SetFocus()
         status:HighlightText()
         f.hint:SetText("Press Ctrl+C to copy.")
-    end, 210)
+    end, 271)
     f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    f.hint:SetPoint("LEFT", f, "BOTTOMLEFT", 418, 222)
+    f.hint:SetPoint("LEFT", f, "BOTTOMLEFT", 418, 283)
     button("Check", 16, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), true) end)
     f.apply = button("Apply", 88, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), false) end)
     f.apply:Disable()
     f.hint:SetText(CHECK_HINT)
     edit:SetScript("OnTextChanged", function()
-        checked = nil
+        invalidate()
         f.summary, f.details, f.full = {}, {}, {}
         display("summary")
         refreshApply()
@@ -989,71 +1088,245 @@ local function buildFrame()
     autoLabel:SetPoint("LEFT", auto, "RIGHT", 2, 0)
     autoLabel:SetText("Auto-fill new spells")
     auto:SetChecked(BarsmithDB.auto)
-    auto:SetScript("OnClick", function(self) BarsmithDB.auto = self:GetChecked() and true or false end)
+    auto:SetScript("OnClick", function(self) setAuto(self:GetChecked() and true or false) end)
     f.auto = auto
+
+    -- The name field is also the destination for Save new, Duplicate and Rename.
+    local profileLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    profileLabel:SetPoint("TOPLEFT", 16, -32)
+    profileLabel:SetWidth(570)
+    profileLabel:SetJustifyH("LEFT")
+    local name = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
+    name:SetSize(136, 22)
+    name:SetPoint("TOPLEFT", 20, -52)
+    name:SetAutoFocus(false)
+    name:SetMaxLetters(64)
+    name:SetScript("OnEscapePressed", name.ClearFocus)
+    local function manage(op)
+        local ok, err = P.manage(op, name:GetText(), edit:GetText())
+        if not ok then showStatus({ err }) end
+    end
+    local function cycle(step)
+        local _, c = P.active()
+        if not c then return end
+        local names = P.names(c)
+        for i, n in ipairs(names) do
+            if n == c.active then P.manage("select", names[(i - 1 + step) % #names + 1]); return end
+        end
+    end
+    button("<", 164, 28, function() cycle(-1) end, 481)
+    button(">", 194, 28, function() cycle(1) end, 481)
+    button("Save new", 228, 82, function() manage("create") end, 481)
+    button("Rename", 313, 72, function() manage("rename") end, 481)
+    button("Duplicate", 388, 84, function() manage("duplicate") end, 481)
+    button("Delete", 475, 65, function()
+        local p, c = P.active()
+        if p then showReview("delete", "Delete profile " .. c.active .. " and its Revert snapshot?",
+            { "Your live action bars and bindings will stay in place." }, { profile = p }) end
+    end, 481)
+    local legacy = button("Legacy", 543, 66, function()
+        if BarsmithDB.legacyPlan then
+            edit:SetText(BarsmithDB.legacyPlan)
+            showStatus({ "Legacy account plan loaded for review. Check and Apply on the owning character." })
+        end
+    end, 481)
+    local overwrite = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+    overwrite:SetSize(24, 24)
+    overwrite:SetPoint("BOTTOMLEFT", 16, 44)
+    local policyLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    policyLabel:SetPoint("LEFT", overwrite, "RIGHT", 2, 0)
+    policyLabel:SetText("Auto-overwrite occupied managed slots for newly available actions")
+    overwrite:SetScript("OnClick", function(self)
+        local p = P.active()
+        if p then p.overwrite = self:GetChecked() and true or false end
+        invalidate()
+        if p and p.overwrite and BarsmithDB.auto then queueAutoFill() end
+    end)
+    refreshProfiles = function()
+        local p, c = P.active()
+        if not p then return end
+        profileLabel:SetText(("Profile: %s   (%s - %s)"):format(c.active, c.name or "?", c.realm or "?"))
+        name:SetText(c.active)
+        overwrite:SetChecked(p.overwrite == true)
+        if BarsmithDB.legacyPlan then legacy:Show() else legacy:Hide() end
+    end
+    button("Level updates", 16, 106, function() BP.levelUpdates("review") end, 75)
+    button("Revert last Apply", 126, 130, function() BP.revert(false) end, 75)
+    f.confirm = button("Confirm", 268, 132, function()
+        if not review then return end
+        if review.kind == "revert" then BP.revert(true)
+        elseif review.kind == "level" then BP.levelUpdates("confirm")
+        elseif review.kind == "delete" and review.profile == P.active() then
+            invalidate()
+            manage("delete")
+        end
+    end, 75)
+    f.later = button("Cancel", 404, 72, function()
+        invalidate()
+        showStatus({ "Canceled. You can review this batch again." })
+    end, 75)
+    f.confirm:Hide()
+    f.later:Hide()
+    f:SetScript("OnHide", invalidate)
 
     f:Hide()
     return f
 end
 
 local function openFrame(text)
-    frame = frame or buildFrame()
+    if not frame then
+        frame = buildFrame()
+        local profile = P.active()
+        text = text or (profile and profile.text)
+    end
+    refreshProfiles()
     frame.auto:SetChecked(BarsmithDB.auto)
     if text then frame.edit:SetText(text) end
     frame:Show()
 end
 
 ------------------------------------------------------------------------
--- Auto-fill: when you learn a spell or get an item, put it in its planned slot if empty
-------------------------------------------------------------------------
+-- Only pending (previously unavailable) actions can displace an occupied slot.
+-- An empty slot on an applied profile retains the original refill behavior.
+local autoQueued, autoAfterCombat, autoAfterCursor = false, false, false
+local notified
 
-local autoQueued, autoAfterCombat = false, false
-
-local function autoFill()
-    autoQueued = false
-    if not (BarsmithDB and BarsmithDB.auto and BarsmithDB.last) then return end
-    if InCombatLockdown() then autoAfterCombat = true return end
-    local plan = BP.parse(BarsmithDB.last)
-    local _, myClass = UnitClass("player")
-    if not plan or (plan.class and plan.class ~= myClass) then return end
-    local book
-    for _, s in ipairs(slotsWithCopies(plan, myClass)) do
-        if (s.kind == "spell" or s.kind == "item") and not HasAction(s.slot) then
-            local target
-            if s.kind == "spell" then
-                book = book or spellbookEntries()
-                target = resolveSpell(s.value, book)
-            else
-                target = resolveItem(s.value)
-            end
-            if target and placeTarget(s.slot, target) and not s.copy then
-                local id = s.kind == "item" and tonumber(s.value:match("^item:(%d+)"))
-                say("Put " .. ((id and getItemName(id)) or s.value) .. " on " .. slotLabel(s.slot) .. ".")
+local function levelBatch(profile)
+    local batch = { empty = {}, occupied = {}, settled = {} }
+    local pickups = {}
+    if not profile or not profile.pending or not profile.text then return batch, pickups end
+    local plan = assert(BP.parse(profile.text))
+    assert(not plan.class or plan.class == select(2, UnitClass("player")), "Plan class mismatch.")
+    local book = spellbookEntries()
+    for _, s in ipairs(managedSlots(plan)) do
+        if (s.kind == "spell" or s.kind == "item") and (profile.pending[s.slot] or not HasAction(s.slot)) then
+            local target = available(s, book)
+            if target and target.id then
+                local before = C.slot(s.slot)
+                if before.kind == s.kind and before.id == target.id then
+                    table.insert(batch.settled, s.slot)
+                else
+                    local op = { slot = s.slot, before = before, after = { kind = s.kind, id = target.id } }
+                    table.insert(before.kind == "empty" and batch.empty or batch.occupied, op)
+                    pickups[s.slot] = target.pickup
+                end
             end
         end
     end
-    ClearCursor()
+    return batch, pickups
 end
 
-local function queueAutoFill()
+local function placeBatch(profile, ops, pickups)
+    local byIndex = {}
+    for i, op in ipairs(ops) do
+        requireRestorable(op.slot, op.before)
+        byIndex[i] = pickups[op.slot]
+    end
+    C.execute(ops, nil, nil, byIndex)
+    for _, op in ipairs(ops) do profile.pending[op.slot] = nil end
+end
+
+function BP.levelUpdates(mode)
+    local profile = P.active()
+    local previous = review
+    if mode ~= "event" then invalidate() end
+    if not (BarsmithDB and BarsmithDB.auto and profile) then
+        if mode ~= "event" then showStatus({ "Auto-fill is disabled or the character is unavailable." }) end
+        return
+    end
+    local ok, err = pcall(function()
+        ready()
+        local batch, pickups = levelBatch(profile)
+        local occupied = batch.occupied
+        if mode == "confirm" then
+            assert(previous and previous.kind == "level" and previous.profile == profile
+                and previous.text == profile.text and C.equal(previous.ops, occupied),
+                "Leveling replacements changed. Review Level updates again.")
+            placeBatch(profile, occupied, pickups)
+            notified = nil
+            return showStatus({ #occupied .. " reviewed replacements applied." })
+        end
+        if mode == "event" then
+            for _, slot in ipairs(batch.settled) do profile.pending[slot] = nil end
+            placeBatch(profile, batch.empty, pickups)
+            if #batch.empty > 0 then say("Filled " .. #batch.empty .. " empty managed slots.") end
+            if #occupied == 0 then notified = nil; return end
+            if profile.overwrite then
+                placeBatch(profile, occupied, pickups)
+                say("Updated " .. #occupied .. " occupied managed slots for this profile.")
+                notified = nil
+                return
+            end
+            if notified and notified.profile == profile and C.equal(notified.ops, occupied) then return end
+            notified = { profile = profile, ops = occupied }
+            local msg = #occupied .. " newly available actions would replace occupied managed slots."
+            if StaticPopup_Show then
+                StaticPopup_Show("BARSMITH_LEVEL_UPDATES", msg)
+            else say(msg .. " Open Level updates to review.") end
+        elseif #occupied == 0 then
+            showStatus({ "No occupied managed slots need leveling updates." })
+        else
+            local lines = {}
+            for _, op in ipairs(occupied) do
+                table.insert(lines, slotLabel(op.slot) .. ": " .. label(op.before) .. " -> " .. label(op.after))
+            end
+            showReview("level", #occupied .. " leveling replacements. Review Details, then approve the batch.",
+                lines, { profile = profile, text = profile.text, ops = occupied })
+        end
+    end)
+    if not ok then
+        if mode == "event" then say("Auto-fill paused: " .. tostring(err))
+        else showStatus({ "Level updates stopped: " .. tostring(err) }) end
+    end
+end
+
+if StaticPopupDialogs then
+    StaticPopupDialogs.BARSMITH_LEVEL_UPDATES = {
+        text = "%s", button1 = "Review batch", button2 = "Later", timeout = 0, whileDead = false, hideOnEscape = true,
+        OnAccept = function() openFrame(); BP.levelUpdates("review") end,
+    }
+end
+
+P.onChange = function()
+    invalidate()
+    notified = nil
+    if StaticPopup_Hide then StaticPopup_Hide("BARSMITH_LEVEL_UPDATES") end
+    if frame then
+        local profile = P.active()
+        frame.edit:SetText(profile.text or "")
+        refreshProfiles()
+    end
+end
+
+queueAutoFill = function()
     if autoQueued then return end
     autoQueued = true
-    C_Timer.After(1, autoFill)
+    C_Timer.After(1, function()
+        autoQueued = false
+        if InCombatLockdown() then autoAfterCombat = true; return end
+        if GetCursorInfo() then autoAfterCursor = true; return end
+        autoAfterCursor = false
+        BP.levelUpdates("event")
+    end)
 end
 
 local events = CreateFrame("Frame")
 -- Not every client has every event (Classic Era has no LEARNED_SPELL_IN_TAB;
 -- newer clients call it LEARNED_SPELL_IN_SKILL_LINE),
 -- and registering an unknown one is an error that would stop the file here.
-for _, ev in ipairs({ "ADDON_LOADED", "SPELLS_CHANGED", "LEARNED_SPELL_IN_TAB", "LEARNED_SPELL_IN_SKILL_LINE", "BAG_UPDATE_DELAYED", "PLAYER_REGEN_ENABLED" }) do
+for _, ev in ipairs({ "ADDON_LOADED", "PLAYER_ENTERING_WORLD", "SPELLS_CHANGED", "LEARNED_SPELL_IN_TAB", "LEARNED_SPELL_IN_SKILL_LINE", "BAG_UPDATE_DELAYED", "CURSOR_CHANGED", "PLAYER_REGEN_ENABLED" }) do
     pcall(events.RegisterEvent, events, ev)
 end
 events:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 == "Barsmith" then
-            BarsmithDB = BarsmithDB or {}
-            if BarsmithDB.auto == nil then BarsmithDB.auto = true end
+            P.init()
         end
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        P.character()
+        queueAutoFill()
+    elseif event == "CURSOR_CHANGED" then
+        if autoAfterCursor and not GetCursorInfo() then queueAutoFill() end
     elseif event == "PLAYER_REGEN_ENABLED" then
         if autoAfterCombat then autoAfterCombat = false; queueAutoFill() end
     elseif BarsmithDB then
@@ -1069,12 +1342,12 @@ SLASH_BARSMITH1 = "/barsmith"
 SlashCmdList.BARSMITH = function(msg)
     msg = trim(msg):lower()
     if msg == "apply" then
-        if BarsmithDB.last then openFrame(BarsmithDB.last); BP.run(BarsmithDB.last, true)
+        local p = P.active()
+        if p and p.text then openFrame(p.text); BP.run(p.text, true)
         else say("No plan applied yet. Type /barsmith and paste one.") end
     elseif msg == "auto" then
-        BarsmithDB.auto = not BarsmithDB.auto
+        setAuto(not BarsmithDB.auto)
         say("Auto-fill new spells is " .. (BarsmithDB.auto and "on." or "off."))
-        if frame then frame.auto:SetChecked(BarsmithDB.auto) end
     elseif msg == "export" then
         openFrame(BP.exportCurrent())
         frame.edit:SetFocus()
@@ -1083,8 +1356,6 @@ SlashCmdList.BARSMITH = function(msg)
     elseif frame and frame:IsShown() then
         frame:Hide()
     else
-        local fresh = not frame
         openFrame()
-        if fresh and BarsmithDB.last then frame.edit:SetText(BarsmithDB.last) end
     end
 end
