@@ -1072,6 +1072,35 @@ local function managedBarsMenu(_, root)
     page(133, "Other page 12")
 end
 
+local PROFILE_NAME_DIALOG = "BARSMITH_PROFILE_NAME"
+local nameActions = {
+    create = { prompt = "New profile name:", accept = "Save" },
+    rename = { prompt = "Rename profile:", accept = "Rename" },
+    duplicate = { prompt = "Duplicate profile as:", accept = "Duplicate" },
+}
+
+local function askProfileName(op, editorText)
+    local profile, c = P.active()
+    if not profile then return showStatus({ "Character identity unavailable." }) end
+    local suggested = c.active
+    if op == "create" then
+        local plan = BP.parse(editorText)
+        suggested = plan and trim(plan.name) or ""
+        if suggested:match(" %(from game%)$") then suggested = "" end
+        suggested = cutBytes(suggested, 64)
+    elseif op == "duplicate" then
+        local n = 1
+        repeat
+            local suffix = n == 1 and " Copy" or (" Copy " .. n)
+            suggested = cutBytes(c.active, 64 - #suffix) .. suffix
+            n = n + 1
+        until not c.profiles[suggested]
+    end
+    local dialog = StaticPopup_Show(PROFILE_NAME_DIALOG, nameActions[op].prompt, nil,
+        { op = op, profile = profile, suggested = suggested, editorText = editorText })
+    if not dialog then showStatus({ "Close another dialog and try again." }) end
+end
+
 local function buildFrame()
     local f = CreateFrame("Frame", "BarsmithFrame", UIParent, "BasicFrameTemplateWithInset")
     f:SetSize(620, 558)
@@ -1090,13 +1119,13 @@ local function buildFrame()
     title:SetText("Barsmith")
 
     local help = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    help:SetPoint("TOPLEFT", 16, -85)
-    help:SetPoint("TOPRIGHT", -16, -85)
+    help:SetPoint("TOPLEFT", 16, -93)
+    help:SetWidth(448)
     help:SetJustifyH("LEFT")
-    help:SetText("Paste a setup plan and click Check. Review the summary before applying changes.")
+    help:SetText("Paste a setup plan and click Check to review it before Apply.")
 
     local scroll = CreateFrame("ScrollFrame", "BarsmithScroll", f, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 18, -108)
+    scroll:SetPoint("TOPLEFT", 18, -117)
     scroll:SetPoint("BOTTOMRIGHT", -38, 306)
 
     local bg = f:CreateTexture(nil, "BACKGROUND", nil, 1)
@@ -1202,44 +1231,35 @@ local function buildFrame()
     auto:SetScript("OnClick", function(self) setAuto(self:GetChecked() and true or false) end)
     f.auto = auto
 
-    -- The name field is also the destination for Save new, Duplicate and Rename.
-    local profileLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    profileLabel:SetPoint("TOPLEFT", 16, -32)
-    profileLabel:SetWidth(338)
-    profileLabel:SetWordWrap(false)
-    profileLabel:SetJustifyH("LEFT")
-    local name = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
-    name:SetSize(130, 22)
-    name:SetPoint("TOPLEFT", 20, -52)
-    name:SetAutoFocus(false)
-    name:SetMaxLetters(64)
-    name:SetScript("OnEscapePressed", name.ClearFocus)
-    local function manage(op)
-        local dest = name:GetText()
-        local c = P.character()
-        if op == "create" and c and (trim(dest) == "" or dest == c.active) then
-            local plan = BP.parse(edit:GetText())
-            if plan and plan.name ~= "" and not plan.name:match(" %(from game%)$") then dest = plan.name end
-        end
-        local ok, err = P.manage(op, dest, edit:GetText())
-        if not ok then showStatus({ err }) end
-    end
-    button("Select profile", 362, 114, function(self) MenuUtil.CreateContextMenu(self, profileMenu) end, 507)
-    button("Managed bars...", 480, 126, function(self) MenuUtil.CreateContextMenu(self, managedBarsMenu) end, 507)
-    button("Save new", 158, 90, function() manage("create") end, 481)
-    button("Rename", 252, 78, function() manage("rename") end, 481)
-    button("Duplicate", 334, 88, function() manage("duplicate") end, 481)
-    button("Delete", 426, 62, function()
+    local characterLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    characterLabel:SetPoint("TOPLEFT", 16, -33)
+    characterLabel:SetWidth(190)
+    characterLabel:SetWordWrap(false)
+    characterLabel:SetJustifyH("LEFT")
+    local selector = CreateFrame("DropdownButton", nil, f, "WowStyle1DropdownTemplate")
+    selector:SetSize(326, 24)
+    selector:SetPoint("TOPRIGHT", -18, -25)
+    selector.Text:SetJustifyH("LEFT")
+    selector:SetupMenu(profileMenu)
+    local profileLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    profileLabel:SetPoint("RIGHT", selector, "LEFT", -12, 0)
+    profileLabel:SetText("Profile:")
+
+    button("Save new", 16, 100, function() askProfileName("create", edit:GetText()) end, 478)
+    button("Rename", 122, 92, function() askProfileName("rename") end, 478)
+    button("Duplicate", 220, 98, function() askProfileName("duplicate") end, 478)
+    button("Delete", 324, 80, function()
         local p, c = P.active()
         if p then showReview("delete", "Delete profile " .. c.active .. " and its Revert snapshot?",
             { "Your live action bars and bindings will stay in place." }, { profile = p }) end
-    end, 481)
-    local legacy = button("Import old plan", 492, 116, function()
+    end, 478)
+    button("Managed bars...", 478, 126, function(self) MenuUtil.CreateContextMenu(self, managedBarsMenu) end, 478)
+    local legacy = button("Import old plan", 478, 126, function()
         if BarsmithDB.legacyPlan then
             edit:SetText(BarsmithDB.legacyPlan)
             showStatus({ "Legacy account plan loaded for review. Check and Apply on the owning character." })
         end
-    end, 481)
+    end, 447)
     tooltip(legacy, "Loads the account-wide Barsmith plan saved before profiles were added. Loading only fills the editor. Use Check, then Apply on the intended character.")
     local overwrite = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
     overwrite:SetSize(24, 24)
@@ -1257,8 +1277,8 @@ local function buildFrame()
         if BarsmithDB and BarsmithDB.legacyPlan then legacy:Show() else legacy:Hide() end
         local p, c = P.active()
         if not p then return end
-        profileLabel:SetText((c.name or "Current character") .. "  /  " .. c.active)
-        name:SetText(c.active)
+        characterLabel:SetText(c.name or "Current character")
+        selector:OverrideText(c.active)
         overwrite:SetChecked(p.overwrite == true)
     end
     local pending = button("Review pending updates", 16, 184, function() BP.levelUpdates("review") end, 75)
@@ -1271,7 +1291,8 @@ local function buildFrame()
         elseif review.kind == "level" then BP.levelUpdates("confirm")
         elseif review.kind == "delete" and review.profile == P.active() then
             invalidate()
-            manage("delete")
+            local ok, err = P.manage("delete")
+            if not ok then showStatus({ err }) end
         end
     end, 75)
     f.later = button("Cancel", 490, 76, function()
@@ -1280,7 +1301,10 @@ local function buildFrame()
     end, 75)
     f.confirm:Hide()
     f.later:Hide()
-    f:SetScript("OnHide", invalidate)
+    f:SetScript("OnHide", function()
+        invalidate()
+        StaticPopup_Hide(PROFILE_NAME_DIALOG)
+    end)
 
     f:Hide()
     return f
@@ -1395,6 +1419,31 @@ function BP.levelUpdates(mode)
 end
 
 if StaticPopupDialogs then
+    StaticPopupDialogs[PROFILE_NAME_DIALOG] = {
+        text = "%s", button1 = "Save", button2 = "Cancel", hasEditBox = true,
+        editBoxWidth = 280, maxLetters = 64, timeout = 0, whileDead = true, hideOnEscape = true,
+        OnShow = function(dialog, data)
+            dialog:GetButton1():SetText(nameActions[data.op].accept)
+            local input = dialog:GetEditBox()
+            input:SetText(data.suggested)
+            input:SetFocus()
+            input:HighlightText()
+        end,
+        OnAccept = function(dialog, data)
+            if P.active() ~= data.profile then
+                showStatus({ "The active profile changed. Open the name dialog again." })
+                return
+            end
+            local ok, err = P.manage(data.op, dialog:GetEditBox():GetText(), data.editorText)
+            if not ok then
+                dialog:SetFormattedText("%s\n%s", nameActions[data.op].prompt, err)
+                dialog:Resize()
+                return true -- Keep the input available for correction.
+            end
+        end,
+        EditBoxOnEnterPressed = function(input) StaticPopup_OnClick(input:GetParent(), 1) end,
+        EditBoxOnEscapePressed = StaticPopup_StandardEditBoxOnEscapePressed,
+    }
     StaticPopupDialogs.BARSMITH_LEVEL_UPDATES = {
         text = "%s", button1 = "Review batch", button2 = "Later", timeout = 0, whileDead = false, hideOnEscape = true,
         OnAccept = function() openFrame(); BP.levelUpdates("review") end,

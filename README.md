@@ -24,11 +24,11 @@ Give your assistant the [AI Action-Bar & Keybinding Design Manual](docs/AI_KEYBI
 
 ## Character profiles and leveling
 
-**Select profile** lists the logged-in character's layouts first and marks the active one. The header reads, for example, **Seren Grey / Leveling**. Profiles belong to the character's GUID, so a rename updates the display and keeps the layouts. Each character starts with **Default**.
+Click the profile name beside **Profile:** to switch layouts. The menu lists the logged-in character’s layouts first and marks the active one. The header shows the character (for example, **Seren Grey**) separately from the selected layout (**Leveling**). Profiles belong to the character's GUID, so a rename updates the display and keeps the layouts. Each character starts with **Default**.
 
-Type a layout name and choose **Save new** to save the plan in the editor. If you leave the name field alone, Save new can use the imported plan's `NAME`. **Rename**, **Duplicate**, and **Delete** act on the current layout. Delete asks for confirmation and keeps at least one profile per character.
+Choose **Save new** to name and save the plan in the editor. The dialog suggests the imported plan’s `NAME` when available. **Rename** opens with the current name selected. **Duplicate** suggests a copy name you can edit. Delete asks for confirmation and keeps at least one profile per character.
 
-Under **Select profile → Other characters**, choose a character and a layout to copy. Barsmith opens an independent draft on the current character, using a numbered suffix if the name already exists. The draft carries the plan and bar exclusions. Future overwrite permission starts off. Check and Apply the draft before Auto-fill can use it. A different-class plan keeps its class and spells for editing in the planner or with an AI assistant.
+Under **Profile → Other characters**, choose a character and a layout to copy. Barsmith opens an independent draft on the current character, using a numbered suffix if the name already exists. The draft carries the plan and bar exclusions. Future overwrite permission starts off. Check and Apply the draft before Auto-fill can use it. A different-class plan keeps its class and spells for editing in the planner or with an AI assistant.
 
 **Managed bars...** lets you reserve a bar or form page for manual use. Clear its checkbox to exclude its action slots from Check/Apply placements, leveling updates, and Revert. Existing profiles start with every page enabled, and Barsmith still places actions only on explicit `SLOT` destinations. Changing a checkbox invalidates the current review. Bindings for buttons on that page and explicit macro definitions still follow their own plan records. Revert honors the current exclusions, even if a bar was managed when you applied the plan.
 

@@ -43,7 +43,8 @@ UnitGUID = function() return "Player-1" end
 UnitName = function() return "Tester" end
 GetRealmName = function() return "Realm" end
 IsPlayerSpell = function(id) return id == 100 end
-SlashCmdList = {}
+SlashCmdList, StaticPopupDialogs = {}, {}
+StaticPopup_StandardEditBoxOnEscapePressed = function(input) input:GetParent():Hide() end
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, line) output[#output+1] = line end }
 
 dofile("addon/Barsmith/Bindings.lua")
@@ -397,20 +398,28 @@ test("setup export round-trips exact slot IDs", function()
     GetNumSpellTabs, GetSpellTabInfo, GetSpellBookItemName, GetSpellBookItemInfo = nil, nil, nil, nil
 end)
 test("real frame gates Apply, switches reports, and invalidates edits immediately", function()
-    local buttons, window, profileName = {}
+    local buttons, labels, window, selector = {}, {}
     local noop = function() end
     local methods = {}
     local function widget(kind, name, parent, template)
         local w = setmetatable({ kind = kind, scripts = {}, enabled = true, text = "" },
             { __index = function(_, k) return methods[k] or noop end })
         if name == "BarsmithFrame" then window = w end
-        if template == "InputBoxTemplate" then profileName = w end
+        assert(kind ~= "EditBox" or parent ~= window, "Unexpected permanent name field")
+        if kind == "DropdownButton" then
+            assert(template == "WowStyle1DropdownTemplate")
+            selector, w.Text = w, widget("FontString")
+        end
         return w
     end
-    methods.CreateFontString, methods.CreateTexture = widget, widget
+    function methods:CreateFontString() return widget("FontString") end
+    methods.CreateTexture = widget
+    function methods:SetupMenu(build) self.build = build end
+    function methods:OverrideText(value) self.Text:SetText(value) end
     function methods:SetText(value)
         self.text = value
         if self.kind == "Button" then buttons[value] = self end
+        if self.kind == "FontString" then labels[value] = self end
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, false) end
     end
     function methods:GetText() return self.text end
@@ -430,10 +439,11 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
         assert(button.enabled and button.visible ~= false, label)
         button.scripts.OnClick(button)
     end
+    assert(selector and not buttons["Select profile"] and labels[UnitName("player")] and labels["Profile:"])
+    assert(selector.Text:GetText() == "Default" and selector.width >= 300)
     -- Check the actual anchored control bounds at the fixed frame size.
     for _, labels in ipairs({
-        { "Select profile", "Managed bars..." },
-        { "Save new", "Rename", "Duplicate", "Delete", "Import old plan" },
+        { "Save new", "Rename", "Duplicate", "Delete", "Managed bars..." },
         { "Review pending updates", "Revert last Apply", "Confirm", "Cancel" },
     }) do
         local right = 0
@@ -443,6 +453,8 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
             right = b.x + b.width + 4
         end
     end
+    local legacy, managed = buttons["Import old plan"], buttons["Managed bars..."]
+    assert(legacy.y + legacy.height < managed.y and legacy.x + legacy.width <= window.width - 10)
     for _, label in ipairs({ "Import old plan", "Census", "Revert last Apply", "Review pending updates" }) do
         assert(buttons[label].scripts.OnEnter and buttons[label].scripts.OnLeave)
     end
@@ -502,8 +514,40 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     -- Revert, confirm it, and delete the profile.
     local plan = BP.serialize({ binds = {{ key = "B", command = "BUTTON" }} })
     window.edit:SetText(plan)
-    profileName:SetText("Healing")
-    click("Save new")
+    local popup, input, action
+    StaticPopup_Show = function(key, prompt, _, data)
+        local def = assert(StaticPopupDialogs[key])
+        popup, input, action = widget("Frame"), widget("EditBox"), widget("PopupButton")
+        popup.prompt, popup.data, popup.definition = prompt, data, def
+        function popup:GetButton1() return action end
+        function popup:GetEditBox() return input end
+        function popup:SetFormattedText(fmt, ...) self.prompt = fmt:format(...) end
+        function input:GetParent() return popup end
+        popup:Show()
+        def.OnShow(popup, data)
+        return popup
+    end
+    StaticPopup_OnClick = function(dialog, index)
+        assert(dialog == popup and popup.visible)
+        if index == 2 or not popup.definition.OnAccept(popup, popup.data) then popup:Hide() end
+    end
+    local function prompt(label, title, accept, expected)
+        click(label)
+        assert(popup.visible and popup.prompt == title and action:GetText() == accept)
+        assert(input:GetText() == expected and input.selected == expected)
+    end
+    local function enter()
+        popup.definition.EditBoxOnEnterPressed(input)
+    end
+    window.edit:SetText(BP.serialize({ name = "Seren (from game)", slots = {} }))
+    prompt("Save new", "New profile name:", "Save", "")
+    popup.definition.EditBoxOnEscapePressed(input)
+    assert(not popup.visible and selector.Text:GetText() == "Default")
+    window.edit:SetText(plan)
+    prompt("Save new", "New profile name:", "Save", "")
+    input:SetText("Healing")
+    enter()
+    assert(not popup.visible and selector.Text:GetText() == "Healing")
     local profile, character = BP.profiles.active()
     assert(character.active == "Healing" and profile.text == plan and owners.B == "ADDON")
     click("Check"); click("Apply")
@@ -539,20 +583,63 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
         root = menuNode()
         build(owner, root)
     end }
+    local function openSelector()
+        root = menuNode()
+        selector.build(selector, root)
+    end
     GetUnitName = function() return "Seren Grey" end
     GetRealmName = function() return "" end
     local imported = BP.serialize({name = "Leveling", slots = {}})
     assert(buttons["Import old plan"].visible == false)
     BarsmithDB.last = imported
     BP.profiles.init()
-    click("Select profile")
+    openSelector()
     assert(root.title == "Seren Grey" and root.limit and root.children.Default.selected())
     window.edit:SetText(imported)
-    click("Save new")
-    assert(character.active == "Leveling" and buttons["Import old plan"].visible)
-    click("Select profile")
-    root.children.Default.click()
+    prompt("Save new", "New profile name:", "Save", "Leveling")
     assert(character.active == "Default")
+    StaticPopup_OnClick(popup, 1)
+    assert(labels["Seren Grey"] and selector.Text:GetText() == "Leveling")
+    assert(character.active == "Leveling" and buttons["Import old plan"].visible)
+    prompt("Rename", "Rename profile:", "Rename", "Leveling")
+    input:SetText("Default")
+    enter()
+    assert(popup.visible and popup.prompt:find("already in use") and character.active == "Leveling")
+    input:SetText("Seren Grey Leveling")
+    enter()
+    local original = BP.profiles.active()
+    assert(selector.Text:GetText() == "Seren Grey Leveling" and not character.profiles.Leveling)
+    prompt("Duplicate", "Duplicate profile as:", "Duplicate", "Seren Grey Leveling Copy")
+    StaticPopup_OnClick(popup, 2)
+    assert(BP.profiles.active() == original and not character.profiles["Seren Grey Leveling Copy"])
+    prompt("Duplicate", "Duplicate profile as:", "Duplicate", "Seren Grey Leveling Copy")
+    enter()
+    assert(BP.profiles.active() ~= original and selector.Text:GetText() == "Seren Grey Leveling Copy")
+    local longName = string.rep("界", 21) .. "X"
+    prompt("Rename", "Rename profile:", "Rename", "Seren Grey Leveling Copy")
+    input:SetText(longName)
+    enter()
+    assert(selector.Text:GetText() == longName)
+    local copyName = string.rep("界", 19) .. " Copy"
+    prompt("Duplicate", "Duplicate profile as:", "Duplicate", copyName)
+    enter()
+    openSelector()
+    root.children[longName].click()
+    prompt("Duplicate", "Duplicate profile as:", "Duplicate", string.rep("界", 19) .. " Copy 2")
+    popup.definition.EditBoxOnEscapePressed(input)
+    assert(not popup.visible and character.active == longName)
+    openSelector()
+    assert(root.children[longName].selected() and not root.children.Default.selected())
+    root.children.Default.click()
+    assert(character.active == "Default" and selector.Text:GetText() == "Default")
+    prompt("Rename", "Rename profile:", "Rename", "Default")
+    openSelector()
+    root.children[longName].click()
+    input:SetText("Stale rename")
+    enter()
+    assert(not popup.visible and character.active == longName and not character.profiles["Stale rename"])
+    openSelector()
+    root.children.Default.click()
     click("Import old plan")
     assert(window.edit:GetText() == imported and BarsmithDB.legacyPlan == imported and not buttons.Apply.enabled)
     click("Check"); click("Apply")
@@ -562,7 +649,7 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     for i = 1, 80 do character.profiles["Layout " .. i] = {} end
     BarsmithDB.characters.alt = { name = "Seren Grey", realm = "Other Realm",
         profiles = { Holy = { text = plan, overwrite = true } }, active = "Holy" }
-    click("Select profile")
+    openSelector()
     assert(root.children.Default.selected() and root.children["Layout 80"] and root.limit <= 360)
     local group = root.children["Other characters"].children["Seren Grey - Other Realm"]
     assert(group.title == "Copy to Seren Grey" and group.limit)
