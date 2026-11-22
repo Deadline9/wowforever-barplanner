@@ -447,5 +447,106 @@ test("macro body change while a leveling batch is open requires fresh review", f
     assert(idAt(1) == "Old")
 end)
 
+test("GUID survives full display name and realm metadata changes", function()
+    local p, c = P.active()
+    apply(plan("SLOT\t3\tspell\tDash"))
+    GetUnitName = function(unit) assert(unit == "player"); return char().fullName end
+    char().fullName, char().realm = "Seren Grey", ""
+    assert(P.character().name == "Seren Grey" and not c.realm)
+    char().fullName, char().realm = "Seren Vale", "Another Realm"
+    reload()
+    assert(P.active() == p and P.character() == c and c.name == "Seren Vale" and c.realm == "Another Realm")
+    assert(p.pending[3] and p.undo)
+    GetUnitName = nil
+end)
+
+test("foreign profile copies are independent local drafts, even for other classes", function()
+    w.guid = "Player-C"
+    local text = plan("CLASS\tPRIEST\nSLOT\t3\tspell\tDash\nENSURE\tB\tBUTTON")
+    assert(P.manage("create", "Leveling", text))
+    apply(text)
+    local source = P.active()
+    source.overwrite = true
+    P.setBarManaged(source, 61, false)
+    w.guid = "Player-A"
+    assert(not P.manage("select", "Leveling"))
+    assert(P.manage("create", "Leveling", plan("SLOT\t2\tspell\tProwl")))
+    local oldDraft = P.active()
+    assert(P.copyFrom("Player-C", "Leveling") == "Leveling (2)")
+    local copy, c = P.active()
+    assert(copy ~= source and copy.text == text and not copy.undo and not copy.pending and not copy.overwrite)
+    assert(c.active == "Leveling (2)" and c.profiles.Leveling == oldDraft)
+    P.setBarManaged(copy, 61, true)
+    assert(P.managesSlot(copy, 64) and not P.managesSlot(source, 64))
+    char().known[3] = true
+    event()
+    assert(not idAt(3) and w.saves == 1)
+    has(BP.run(text, true), "different class")
+    apply(plan("CLASS\tDRUID\nSLOT\t3\tspell\tWrath"))
+    assert(idAt(3) == 5 and source.text == text)
+    w.guid = "Player-C"
+    assert(P.active() == source and source.pending[3] and source.undo)
+end)
+
+test("excluded Bar 2 slots skip Check and Apply while explicit binding changes still run", function()
+    spell(61, 1); spell(72, 1); spell(73, 1)
+    w.keys.Z, w.keys.X = "MULTIACTIONBAR1BUTTON1", "MULTIACTIONBAR1BUTTON1"
+    local p = P.active()
+    local text = plan("SLOT\t60\tspell\tWrath\nSLOT\t61\tclear\t\nSLOT\t72\tspell\tWrath\nSLOT\t73\tspell\tWrath\nENSURE\tB\tMULTIACTIONBAR1BUTTON1")
+    BP.run(text, true)
+    P.setBarManaged(p, 61, false)
+    has(BP.run(text, false), "Run Check")
+    local s = BP.run(text, true)
+    has(s, "Skipped 2 planned slots on excluded bars")
+    char().slots[61] = { "flyout", 23 } -- an unrelated edit after Check
+    has(BP.run(text, false), "Done:")
+    assert(idAt(60) == 5 and idAt(61) == 23 and idAt(72) == 1 and idAt(73) == 5)
+    assert(w.keys.B == w.keys.Z and w.keys.Z == w.keys.X and w.keys.Z == "MULTIACTIONBAR1BUTTON1")
+    assert(P.manage("duplicate", "Resto"))
+    P.setBarManaged(P.active(), 61, true)
+    assert(not P.managesSlot(p, 61))
+    assert(P.manage("select", "Default"))
+    reload()
+    assert(not P.managesSlot(P.active(), 72))
+end)
+
+test("leveling filters empty, occupied and stale approved slots by physical form page", function()
+    spell(74, 1); spell(97, 1)
+    local p = P.active()
+    apply(plan("SLOT\t73\tspell\tDash\nSLOT\t74\tspell\tDash\nSLOT\t97\tspell\tDash"))
+    char().known[3] = true
+    BP.levelUpdates("review")
+    P.setBarManaged(p, 73, false)
+    BP.levelUpdates("confirm")
+    assert(not idAt(73) and idAt(74) == 1 and idAt(97) == 1)
+    event()
+    assert(#w.prompts == 1)
+    has(w.prompts, "1 newly available")
+    BP.levelUpdates("review"); BP.levelUpdates("confirm")
+    assert(idAt(97) == 3 and not idAt(73) and idAt(74) == 1)
+    p.overwrite = true
+    event()
+    assert(not idAt(73) and idAt(74) == 1 and #w.prompts == 1)
+end)
+
+test("Revert skips newly excluded stale slots and preserves current exclusions", function()
+    spell(1, 1); spell(61, 1)
+    apply(plan("SLOT\t1\tspell\tWrath\nSLOT\t61\tspell\tWrath\nENSURE\tB\tBUTTON"))
+    BP.revert(false)
+    P.setBarManaged(P.active(), 61, false)
+    has(BP.revert(true), "Preview Revert again")
+    char().slots[61] = { "flyout", 99 }
+    revert()
+    assert(idAt(61) == 99 and idAt(1) == 1 and w.keys.B == "PACK")
+    assert(not P.managesSlot(P.active(), 61))
+end)
+
+test("Revert cannot delete a macro still on a newly excluded slot", function()
+    apply(plan("MACRO\tKeep\t\t1\t/dance\nSLOT\t61\tmacro\tKeep\nENSURE\tB\tBUTTON"))
+    P.setBarManaged(P.active(), 61, false)
+    has(BP.revert(false), "Macro Keep is now used on Bar 2")
+    assert(idAt(61) == "Keep" and w.macros.Keep and w.keys.B == "BUTTON" and P.active().undo)
+end)
+
 print(passed .. " passed, " .. failed .. " failed")
 assert(failed == 0)

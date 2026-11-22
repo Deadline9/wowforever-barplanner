@@ -26,13 +26,57 @@ function P.character()
         c = { profiles = { Default = {} }, active = "Default" }
         BarsmithDB.characters[guid] = c
     end
-    c.name, c.realm = UnitName("player"), GetRealmName()
+    local name = GetUnitName and GetUnitName("player")
+    if not name or name == "" then name = UnitName("player") end
+    if name and name ~= "" then c.name = name end
+    local realm = GetRealmName()
+    c.realm = realm ~= "" and realm or nil
     return c
 end
 
 function P.active()
     local c = P.character()
     return c and c.profiles[c.active], c
+end
+
+-- Key the exclusion by the first physical slot, including alternate form pages.
+function P.managesSlot(profile, slot)
+    local first = slot - (slot - 1) % 12
+    return not (profile.excludedBars and profile.excludedBars[first])
+end
+
+function P.setBarManaged(profile, first, managed)
+    if profile ~= P.active() or first < 1 or first > 169 or (first - 1) % 12 ~= 0 then return end
+    if P.managesSlot(profile, first) == managed then return end
+    profile.excludedBars = profile.excludedBars or {}
+    profile.excludedBars[first] = not managed or nil
+    if P.onBarsChanged then P.onBarsChanged() end
+end
+
+local function draft(source)
+    local p = { text = source.text }
+    if source.excludedBars then
+        p.excludedBars = {}
+        for first in pairs(source.excludedBars) do p.excludedBars[first] = true end
+    end
+    return p
+end
+
+function P.copyFrom(guid, sourceName)
+    local c = P.character()
+    local owner = BarsmithDB and BarsmithDB.characters[guid]
+    local source = owner and owner.profiles[sourceName]
+    if not c or owner == c or not source then return nil, "Source profile unavailable." end
+    local name, n = sourceName, 2
+    while c.profiles[name] do
+        local suffix = " (" .. n .. ")"
+        name = Barsmith.cutBytes(sourceName, 64 - #suffix) .. suffix
+        n = n + 1
+    end
+    c.profiles[name] = draft(source)
+    c.active = name
+    if P.onChange then P.onChange() end
+    return name
 end
 
 -- Creation and duplication save a draft. Only Check + Apply arms future placements.
@@ -57,7 +101,8 @@ function P.manage(op, name, text)
             if plan.class and plan.class ~= select(2, UnitClass("player")) then return nil, "Plan class mismatch." end
             c.profiles[name] = { text = text }
         elseif op == "duplicate" then
-            c.profiles[name] = { text = p.text, overwrite = p.overwrite }
+            c.profiles[name] = draft(p)
+            c.profiles[name].overwrite = p.overwrite
         elseif op == "rename" then
             c.profiles[name], c.profiles[c.active] = p, nil
         else

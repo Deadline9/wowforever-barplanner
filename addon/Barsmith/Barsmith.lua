@@ -165,6 +165,8 @@ local function cutBytes(s, n)
     return s:sub(1, i - 1)
 end
 
+BP.cutBytes = cutBytes
+
 -- Returns plan or nil, error message.
 function BP.parse(text)
     text = trim(text)
@@ -456,7 +458,7 @@ end
 
 -- Older hand-authored plans sometimes clear a stale slot before reserving it
 -- for a future spell. Review that pair as one physical change.
-local function managedSlots(plan)
+local function managedSlots(plan, profile)
     local slots, bySlot, clearFirst = {}, {}, {}
     for _, s in ipairs(plan.slots) do
         assert(s.slot >= 1 and s.slot <= 180 and s.slot == math.floor(s.slot), "Invalid slot: " .. s.slot)
@@ -471,7 +473,12 @@ local function managedSlots(plan)
             assert(C.equal(slots[i], s), "Competing actions for " .. slotLabel(s.slot))
         end
     end
-    return slots, clearFirst
+    if not profile.excludedBars then return slots, clearFirst, 0 end
+    local included = {}
+    for _, s in ipairs(slots) do
+        if P.managesSlot(profile, s.slot) then table.insert(included, s) end
+    end
+    return included, clearFirst, #slots - #included
 end
 
 local function macroName(value)
@@ -485,7 +492,7 @@ local function macroName(value)
     return existing and existing.name or cutBytes(value, MACRO_NAME_MAX)
 end
 
-local function reviewPlan(plan, preview)
+local function reviewPlan(plan, preview, profile)
     local r = {
         binding = preview, bound = preview and #preview.changes or 0, bindsSame = preview and preview.same or 0,
         placed = 0, same = 0, cleared = 0, macrosNew = 0, macrosChanged = 0, macrosSame = 0,
@@ -522,7 +529,8 @@ local function reviewPlan(plan, preview)
         end
     end
     local book = spellbookEntries()
-    local slots, clearFirst = managedSlots(plan)
+    local slots, clearFirst, excluded = managedSlots(plan, profile)
+    r.excluded = excluded
     for _, s in ipairs(slots) do
         local before = C.slot(s.slot)
         local after, pickup, why
@@ -655,6 +663,11 @@ local function reportLines(r, dry)
         if op.name then
             change((op.before and "Update " or "Create ") .. (op.after.perChar and "character macro " or "account macro ") .. op.name)
         end
+    end
+    if r.excluded > 0 then
+        local msg = ("Skipped %s on excluded bars."):format(countLabel(r.excluded, "planned slot"))
+        summary[#summary + 1] = msg
+        change(msg)
     end
     if binding then
         for _, msg in ipairs(binding.lines) do change(msg) end
@@ -803,7 +816,9 @@ end
 local function profileState(p)
     local pending = p.pending and {}
     for slot in pairs(p.pending or {}) do pending[slot] = true end
-    return { text = p.text, pending = pending }
+    local excluded = {}
+    for first in pairs(p.excludedBars or {}) do excluded[first] = true end
+    return { text = p.text, pending = pending, excludedBars = excluded }
 end
 
 local function ready()
@@ -832,7 +847,7 @@ function BP.run(text, dry)
             preview = B.preview(plan, B.capture(plan.binds))
             preview.legacy = plan.version == 1
         end
-        local r, pickups = reviewPlan(plan, preview)
+        local r, pickups = reviewPlan(plan, preview, profile)
         local state = profileState(profile)
         if dry then
             if not preview or #preview.errors == 0 then
@@ -886,9 +901,17 @@ local function revertPlan(profile)
     local u = assert(profile.undo, "This profile has no Apply to revert.")
     assert(profile.text == u.text, "Profile plan changed since Apply.")
     local ops, lines, editedMacros = {}, {}, {}
-    for _, op in ipairs(u.ops) do if op.name then editedMacros[op.name:lower()] = true end end
-    for i = #u.ops, 1, -1 do
-        local op = u.ops[i]
+    local included = {}
+    for _, op in ipairs(u.ops) do
+        if not op.slot or P.managesSlot(profile, op.slot) then
+            table.insert(included, op)
+            if op.name then editedMacros[op.name:lower()] = true end
+        else
+            table.insert(lines, "Leave excluded " .. slotLabel(op.slot) .. " untouched.")
+        end
+    end
+    for i = #included, 1, -1 do
+        local op = included[i]
         local where = op.name or slotLabel(op.slot)
         assert(C.equal(C.read(op), op.after), where .. " changed since Apply.")
         if op.slot then
@@ -906,7 +929,7 @@ local function revertPlan(profile)
             if not op.before then
                 assert(op.after.perChar or u.visit == BarsmithDB.characterVisit,
                     "Cannot verify other characters' uses of new account macro " .. op.name .. " after switching characters.")
-                local used = macroInUse(op.name, u.ops)
+                local used = macroInUse(op.name, included)
                 assert(not used, used)
                 -- A new key bound directly to this macro would lose its action.
                 local cmd = "MACRO " .. op.name
@@ -971,6 +994,82 @@ local function setAuto(enabled)
     if frame then frame.auto:SetChecked(enabled) end
     if enabled then queueAutoFill()
     elseif StaticPopup_Hide then StaticPopup_Hide("BARSMITH_LEVEL_UPDATES") end
+end
+
+local function tooltip(button, text)
+    button:HookScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText(text, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    button:HookScript("OnLeave", function() GameTooltip:Hide() end)
+end
+
+local function profileMenu(_, root)
+    local current = P.character()
+    if not current then return end
+    root:SetScrollMode(320)
+    root:CreateTitle(current.name or "Current character")
+    for _, name in ipairs(P.names(current)) do
+        root:CreateRadio(name, function() return current.active == name end, function()
+            if P.character() == current and current.active ~= name then P.manage("select", name) end
+        end)
+    end
+
+    local others, counts, qualifiedCounts = {}, {}, {}
+    for guid, c in pairs(BarsmithDB.characters) do
+        local name = c.name or guid
+        local qualified = c.realm and c.realm ~= "" and (name .. " - " .. c.realm) or name
+        counts[name] = (counts[name] or 0) + 1
+        qualifiedCounts[qualified] = (qualifiedCounts[qualified] or 0) + 1
+        if c ~= current then
+            table.insert(others, { guid = guid, owner = c, name = name, qualified = qualified })
+        end
+    end
+    if #others == 0 then return end
+    for _, row in ipairs(others) do
+        row.label = counts[row.name] == 1 and row.name or row.qualified
+        if qualifiedCounts[row.qualified] > 1 then row.label = row.label .. " (" .. row.guid .. ")" end
+    end
+    table.sort(others, function(a, b) return a.label < b.label end)
+    root:CreateDivider()
+    local section = root:CreateButton("Other characters")
+    section:SetScrollMode(320)
+    for _, row in ipairs(others) do
+        local group = section:CreateButton(row.label)
+        group:SetScrollMode(320)
+        group:CreateTitle("Copy to " .. (current.name or "this character"))
+        for _, name in ipairs(P.names(row.owner)) do
+            group:CreateButton(name, function()
+                if P.character() ~= current then return end
+                local copied, err = P.copyFrom(row.guid, name)
+                showStatus({ copied and ("Copied " .. copied .. " as a draft. Review the plan with Check before Apply.") or err })
+            end)
+        end
+    end
+end
+
+local FORM_LABELS = {
+    DRUID = { [73] = "Cat Form", [85] = "Prowl", [97] = "Bear Form", [109] = "Moonkin Form" },
+    WARRIOR = { [73] = "Battle Stance", [85] = "Defensive Stance", [97] = "Berserker Stance" },
+    ROGUE = { [73] = "Stealth" }, PRIEST = { [73] = "Shadowform" },
+}
+
+local function managedBarsMenu(_, root)
+    local p = P.active()
+    if not p then return end
+    local forms = FORM_LABELS[select(2, UnitClass("player"))] or {}
+    root:SetScrollMode(360)
+    root:CreateTitle("Managed action slots")
+    local function page(first, name)
+        root:CreateCheckbox(("%s (%d–%d)"):format(name, first, first + 11),
+            function() return P.managesSlot(p, first) end,
+            function() P.setBarManaged(p, first, not P.managesSlot(p, first)) end)
+    end
+    for _, bar in ipairs(PAGES) do page(bar.first, forms[bar.first] or bar.label) end
+    -- BP2 also accepts explicit SLOT records on these two physical pages.
+    page(121, "Other page 11")
+    page(133, "Other page 12")
 end
 
 local function buildFrame()
@@ -1082,7 +1181,7 @@ local function buildFrame()
         exportHelp(SETUP_HELP)
     end)
     button("Clear", 281, 55, function() edit:SetText(""); edit:SetFocus() end)
-    button("Census", 338, 72, function()
+    local census = button("Census", 338, 72, function()
         local ok, snapshot = pcall(B.census, esc)
         if not ok then showStatus({ "Census failed: " .. tostring(snapshot) }); return end
         edit:SetText(snapshot)
@@ -1090,6 +1189,8 @@ local function buildFrame()
         edit:HighlightText()
         exportHelp("Copy this read-only BC1 census. Load it into the planner with your plan open.")
     end)
+
+    tooltip(census, "Creates a read-only snapshot of current WoW keybindings, including detectable secondary and addon bindings. Use it with the planner or an AI assistant to avoid conflicts.")
 
     local auto = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
     auto:SetSize(24, 24)
@@ -1104,42 +1205,42 @@ local function buildFrame()
     -- The name field is also the destination for Save new, Duplicate and Rename.
     local profileLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     profileLabel:SetPoint("TOPLEFT", 16, -32)
-    profileLabel:SetWidth(570)
+    profileLabel:SetWidth(338)
+    profileLabel:SetWordWrap(false)
     profileLabel:SetJustifyH("LEFT")
     local name = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
-    name:SetSize(136, 22)
+    name:SetSize(130, 22)
     name:SetPoint("TOPLEFT", 20, -52)
     name:SetAutoFocus(false)
     name:SetMaxLetters(64)
     name:SetScript("OnEscapePressed", name.ClearFocus)
     local function manage(op)
-        local ok, err = P.manage(op, name:GetText(), edit:GetText())
+        local dest = name:GetText()
+        local c = P.character()
+        if op == "create" and c and (trim(dest) == "" or dest == c.active) then
+            local plan = BP.parse(edit:GetText())
+            if plan and plan.name ~= "" and not plan.name:match(" %(from game%)$") then dest = plan.name end
+        end
+        local ok, err = P.manage(op, dest, edit:GetText())
         if not ok then showStatus({ err }) end
     end
-    local function cycle(step)
-        local _, c = P.active()
-        if not c then return end
-        local names = P.names(c)
-        for i, n in ipairs(names) do
-            if n == c.active then P.manage("select", names[(i - 1 + step) % #names + 1]); return end
-        end
-    end
-    button("<", 164, 28, function() cycle(-1) end, 481)
-    button(">", 194, 28, function() cycle(1) end, 481)
-    button("Save new", 228, 82, function() manage("create") end, 481)
-    button("Rename", 313, 72, function() manage("rename") end, 481)
-    button("Duplicate", 388, 84, function() manage("duplicate") end, 481)
-    button("Delete", 475, 65, function()
+    button("Select profile", 362, 114, function(self) MenuUtil.CreateContextMenu(self, profileMenu) end, 507)
+    button("Managed bars...", 480, 126, function(self) MenuUtil.CreateContextMenu(self, managedBarsMenu) end, 507)
+    button("Save new", 158, 90, function() manage("create") end, 481)
+    button("Rename", 252, 78, function() manage("rename") end, 481)
+    button("Duplicate", 334, 88, function() manage("duplicate") end, 481)
+    button("Delete", 426, 62, function()
         local p, c = P.active()
         if p then showReview("delete", "Delete profile " .. c.active .. " and its Revert snapshot?",
             { "Your live action bars and bindings will stay in place." }, { profile = p }) end
     end, 481)
-    local legacy = button("Legacy", 543, 66, function()
+    local legacy = button("Import old plan", 492, 116, function()
         if BarsmithDB.legacyPlan then
             edit:SetText(BarsmithDB.legacyPlan)
             showStatus({ "Legacy account plan loaded for review. Check and Apply on the owning character." })
         end
     end, 481)
+    tooltip(legacy, "Loads the account-wide Barsmith plan saved before profiles were added. Loading only fills the editor. Use Check, then Apply on the intended character.")
     local overwrite = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
     overwrite:SetSize(24, 24)
     overwrite:SetPoint("BOTTOMLEFT", 16, 44)
@@ -1153,16 +1254,18 @@ local function buildFrame()
         if p and p.overwrite and BarsmithDB.auto then queueAutoFill() end
     end)
     refreshProfiles = function()
+        if BarsmithDB and BarsmithDB.legacyPlan then legacy:Show() else legacy:Hide() end
         local p, c = P.active()
         if not p then return end
-        profileLabel:SetText(("Profile: %s   (%s - %s)"):format(c.active, c.name or "?", c.realm or "?"))
+        profileLabel:SetText((c.name or "Current character") .. "  /  " .. c.active)
         name:SetText(c.active)
         overwrite:SetChecked(p.overwrite == true)
-        if BarsmithDB.legacyPlan then legacy:Show() else legacy:Hide() end
     end
-    button("Level updates", 16, 106, function() BP.levelUpdates("review") end, 75)
-    button("Revert last Apply", 126, 130, function() BP.revert(false) end, 75)
-    f.confirm = button("Confirm", 268, 132, function()
+    local pending = button("Review pending updates", 16, 184, function() BP.levelUpdates("review") end, 75)
+    local revert = button("Revert last Apply", 204, 140, function() BP.revert(false) end, 75)
+    tooltip(pending, "Auto-fill handles leveling automatically. Review occupied-slot replacements here, including any you postponed.")
+    tooltip(revert, "Preview and restore the Barsmith-managed state from immediately before this profile's most recent Apply.")
+    f.confirm = button("Confirm", 348, 138, function()
         if not review then return end
         if review.kind == "revert" then BP.revert(true)
         elseif review.kind == "level" then BP.levelUpdates("confirm")
@@ -1171,7 +1274,7 @@ local function buildFrame()
             manage("delete")
         end
     end, 75)
-    f.later = button("Cancel", 404, 72, function()
+    f.later = button("Cancel", 490, 76, function()
         invalidate()
         showStatus({ "Canceled. You can review this batch again." })
     end, 75)
@@ -1208,7 +1311,7 @@ local function levelBatch(profile)
     local plan = assert(BP.parse(profile.text))
     assert(not plan.class or plan.class == select(2, UnitClass("player")), "Plan class mismatch.")
     local book = spellbookEntries()
-    for _, s in ipairs(managedSlots(plan)) do
+    for _, s in ipairs(managedSlots(plan, profile)) do
         if (s.kind == "spell" or s.kind == "item") and (profile.pending[s.slot] or not HasAction(s.slot)) then
             local target = available(s, book)
             if target and target.id then
@@ -1252,7 +1355,7 @@ function BP.levelUpdates(mode)
         if mode == "confirm" then
             assert(previous and previous.kind == "level" and previous.profile == profile
                 and previous.text == profile.text and C.equal(previous.ops, occupied),
-                "Leveling replacements changed. Review Level updates again.")
+                "Leveling replacements changed. Open Review pending updates again.")
             placeBatch(profile, occupied, pickups)
             notified = nil
             return showStatus({ #occupied .. " reviewed replacements applied." })
@@ -1273,7 +1376,7 @@ function BP.levelUpdates(mode)
             local msg = #occupied .. " newly available actions would replace occupied managed slots."
             if StaticPopup_Show then
                 StaticPopup_Show("BARSMITH_LEVEL_UPDATES", msg)
-            else say(msg .. " Open Level updates to review.") end
+            else say(msg .. " Open Review pending updates.") end
         elseif #occupied == 0 then
             showStatus({ "No occupied managed slots need leveling updates." })
         else
@@ -1296,6 +1399,13 @@ if StaticPopupDialogs then
         text = "%s", button1 = "Review batch", button2 = "Later", timeout = 0, whileDead = false, hideOnEscape = true,
         OnAccept = function() openFrame(); BP.levelUpdates("review") end,
     }
+end
+
+P.onBarsChanged = function()
+    invalidate()
+    notified = nil
+    if StaticPopup_Hide then StaticPopup_Hide("BARSMITH_LEVEL_UPDATES") end
+    showStatus({ "Managed bars updated. Run Check to review the plan with these settings." })
 end
 
 P.onChange = function()

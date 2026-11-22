@@ -414,6 +414,9 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, false) end
     end
     function methods:GetText() return self.text end
+    function methods:HookScript(event, handler) self.scripts[event] = handler end
+    function methods:SetSize(width, height) self.width, self.height = width, height end
+    function methods:SetPoint(point, x, y) self.anchor, self.x, self.y = point, x, y end
     function methods:SetScript(event, handler) self.scripts[event] = handler end
     function methods:Show() self.visible = true end
     function methods:Hide() self.visible = false end
@@ -426,6 +429,22 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
         local button = buttons[label]
         assert(button.enabled and button.visible ~= false, label)
         button.scripts.OnClick(button)
+    end
+    -- Check the actual anchored control bounds at the fixed frame size.
+    for _, labels in ipairs({
+        { "Select profile", "Managed bars..." },
+        { "Save new", "Rename", "Duplicate", "Delete", "Import old plan" },
+        { "Review pending updates", "Revert last Apply", "Confirm", "Cancel" },
+    }) do
+        local right = 0
+        for _, label in ipairs(labels) do
+            local b = assert(buttons[label])
+            assert(b.anchor == "BOTTOMLEFT" and b.x >= right and b.x + b.width <= window.width - 10, label)
+            right = b.x + b.width + 4
+        end
+    end
+    for _, label in ipairs({ "Import old plan", "Census", "Revert last Apply", "Review pending updates" }) do
+        assert(buttons[label].scripts.OnEnter and buttons[label].scripts.OnLeave)
     end
     local slotsOnly = BP.serialize({ slots = {{slot = 1, kind = "clear", value = ""}} })
     window.edit:SetText(slotsOnly)
@@ -497,6 +516,65 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     assert(owners.B == "ADDON" and not profile.undo)
     click("Delete"); click("Delete profile")
     assert(character.active == "Default" and not character.profiles.Healing)
+
+    local root
+    local function menuNode(label)
+        local node = { label = label, children = {} }
+        function node:CreateButton(text, click)
+            local child = menuNode(text)
+            self.children[text], child.click = child, click
+            return child
+        end
+        function node:CreateRadio(text, selected, click)
+            local child = self:CreateButton(text, click)
+            child.selected = selected
+        end
+        node.CreateCheckbox = node.CreateRadio
+        function node:CreateTitle(text) self.title = text end
+        function node:SetScrollMode(limit) self.limit = limit end
+        node.CreateDivider = noop
+        return node
+    end
+    MenuUtil = { CreateContextMenu = function(owner, build)
+        root = menuNode()
+        build(owner, root)
+    end }
+    GetUnitName = function() return "Seren Grey" end
+    GetRealmName = function() return "" end
+    local imported = BP.serialize({name = "Leveling", slots = {}})
+    assert(buttons["Import old plan"].visible == false)
+    BarsmithDB.last = imported
+    BP.profiles.init()
+    click("Select profile")
+    assert(root.title == "Seren Grey" and root.limit and root.children.Default.selected())
+    window.edit:SetText(imported)
+    click("Save new")
+    assert(character.active == "Leveling" and buttons["Import old plan"].visible)
+    click("Select profile")
+    root.children.Default.click()
+    assert(character.active == "Default")
+    click("Import old plan")
+    assert(window.edit:GetText() == imported and BarsmithDB.legacyPlan == imported and not buttons.Apply.enabled)
+    click("Check"); click("Apply")
+    assert(not BarsmithDB.legacyPlan and not buttons["Import old plan"].visible)
+
+    -- Long profile lists remain selectable by name. A foreign row can only copy.
+    for i = 1, 80 do character.profiles["Layout " .. i] = {} end
+    BarsmithDB.characters.alt = { name = "Seren Grey", realm = "Other Realm",
+        profiles = { Holy = { text = plan, overwrite = true } }, active = "Holy" }
+    click("Select profile")
+    assert(root.children.Default.selected() and root.children["Layout 80"] and root.limit <= 360)
+    local group = root.children["Other characters"].children["Seren Grey - Other Realm"]
+    assert(group.title == "Copy to Seren Grey" and group.limit)
+    group.children.Holy.click()
+    assert(character.active == "Holy" and BP.profiles.active() ~= BarsmithDB.characters.alt.profiles.Holy)
+    assert(not BP.profiles.active().pending and not buttons.Apply.enabled)
+    click("Check")
+    click("Managed bars...")
+    local bar = root.children["Bar 2 (61–72)"]
+    assert(bar.selected())
+    bar.click()
+    assert(not bar.selected() and not buttons.Apply.enabled and window.edit:GetText() == plan)
 end)
 print(passed .. " passed, " .. failures .. " failed")
 assert(failures == 0)
