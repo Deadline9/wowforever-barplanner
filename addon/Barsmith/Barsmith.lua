@@ -714,7 +714,6 @@ function BP.exportCurrent()
         race = UnitRace and (UnitRace("player")) or nil, macros = {}, slots = {}, binds = {} }
     local book = spellbookEntries()
     local seenMacro = {}
-    local maxAccount = MAX_ACCOUNT_MACROS or 120
     local profile = P.active()
     local saved = profile and profile.pending and profile.text and BP.parse(profile.text)
     local explicit = {}
@@ -728,15 +727,11 @@ function BP.exportCurrent()
                 if kind == "spell" then
                     plan.slots[#plan.slots + 1] = { slot = slot, kind = kind, value = exportSpell(id, book) }
                 elseif kind == "macro" then
-                    local name, icon, body = GetMacroInfo(id)
-                    if name then
-                        plan.slots[#plan.slots + 1] = { slot = slot, kind = "macro", value = name }
-                        if not seenMacro[name] then
-                            seenMacro[name] = true
-                            plan.macros[#plan.macros + 1] = {
-                                name = name, icon = tostring(icon or ""), perChar = id > maxAccount, body = body or "",
-                            }
-                        end
+                    local macro = C.slotMacro(slot)
+                    plan.slots[#plan.slots + 1] = { slot = slot, kind = "macro", value = macro.name }
+                    if not seenMacro[macro.name] then
+                        seenMacro[macro.name] = true
+                        plan.macros[#plan.macros + 1] = macro
                     end
                 elseif kind == "item" then
                     local name = getItemName(id)
@@ -889,8 +884,7 @@ local function macroInUse(name, ops)
         if op.slot then changing[op.slot] = true end
     end
     for slot = 1, math.max(MAX_ACTION_BUTTONS or 0, 180) do
-        local kind, index = GetActionInfo(slot)
-        if kind == "macro" and GetMacroInfo(index) == name and not changing[slot] then
+        if not changing[slot] and GetActionInfo(slot) == "macro" and C.slotMacro(slot).name == name then
             return "Macro " .. name .. " is now used on " .. slotLabel(slot)
         end
     end
@@ -1202,13 +1196,16 @@ local function buildFrame()
         f.summary, f.details, f.full = { msg }, { msg }, { msg }
         display("summary")
     end
-    f.exportHelp = exportHelp
-    button("Export setup", 160, 117, function()
-        edit:SetText(BP.exportCurrent())
+    local function exportSetup()
+        local ok, result = pcall(BP.exportCurrent)
+        if not ok then return showStatus({ "Export stopped: " .. tostring(result) }) end
+        edit:SetText(result)
         edit:SetFocus()
         edit:HighlightText()
         exportHelp(SETUP_HELP)
-    end)
+    end
+    f.exportSetup = exportSetup
+    button("Export setup", 160, 117, exportSetup)
     button("Clear", 281, 55, function() edit:SetText(""); edit:SetFocus() end)
     local census = button("Census", 338, 72, function()
         local ok, snapshot = pcall(B.census, esc)
@@ -1519,10 +1516,8 @@ SlashCmdList.BARSMITH = function(msg)
         setAuto(not BarsmithDB.auto)
         say("Auto-fill new spells is " .. (BarsmithDB.auto and "on." or "off."))
     elseif msg == "export" then
-        openFrame(BP.exportCurrent())
-        frame.edit:SetFocus()
-        frame.edit:HighlightText()
-        frame.exportHelp(SETUP_HELP)
+        openFrame()
+        frame.exportSetup()
     elseif frame and frame:IsShown() then
         frame:Hide()
     else

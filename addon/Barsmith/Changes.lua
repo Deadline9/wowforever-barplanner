@@ -35,6 +35,18 @@ function C.macro(name)
     return { name = n, icon = icon, body = body, perChar = i > (MAX_ACCOUNT_MACROS or 120) }
 end
 
+-- GetActionInfo can describe a macro's item or spell instead of returning its
+-- macro index. Read the slot's own label, then require one match across both
+-- macro lists. The matching macro record supplies its account/character scope.
+function C.slotMacro(slot)
+    local getText = C_ActionBar and C_ActionBar.GetActionText or GetActionText
+    local name = getText and getText(slot)
+    assert(name and name ~= "", "Cannot identify macro on slot " .. slot .. ": no macro label.")
+    local macro = C.macro(name)
+    assert(macro, "Cannot identify macro on slot " .. slot .. ": no stored macro named " .. name)
+    return macro
+end
+
 function C.slot(slot)
     local kind, id, subtype = GetActionInfo(slot)
     if not kind then
@@ -42,9 +54,8 @@ function C.slot(slot)
         return { kind = "empty" }
     end
     if kind == "macro" then
-        local name = GetMacroInfo(id)
-        assert(name and macroIndex(name) == id, "Cannot identify macro on slot " .. slot)
-        return { kind = kind, name = name, perChar = id > (MAX_ACCOUNT_MACROS or 120) }
+        local macro = C.slotMacro(slot)
+        return { kind = kind, name = macro.name, perChar = macro.perChar }
     end
     return { kind = kind, id = id, subtype = subtype }
 end

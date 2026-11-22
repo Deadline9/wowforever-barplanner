@@ -46,7 +46,15 @@ end
 DeleteMacro = function(i) w.macros[GetMacroInfo(i)] = nil end
 GetActionInfo = function(s)
     local a = char().slots[s]
-    if a then return a[1], a[1] == "macro" and GetMacroIndexByName(a[2]) or a[2] end
+    if a and a[1] == "macro" then
+        if w.macroActionID then return "macro", w.macroActionID, "item" end
+        return "macro", GetMacroIndexByName(a[2])
+    end
+    if a then return a[1], a[2] end
+end
+GetActionText = function(slot)
+    local a = char().slots[slot]
+    if a and a[1] == "macro" then return a[2] end
 end
 HasAction = function(s) return char().slots[s] ~= nil end
 GetCursorInfo = function()
@@ -264,6 +272,57 @@ test("manual overwrite counts, details and stale slot preflight", function()
     assert(idAt(1) == 5 and not idAt(2) and w.keys.B == "BUTTON")
 end)
 
+test("a character macro placed on slot 54 survives immediate Check, Apply and Revert", function()
+    local body = "#showtooltip\n/use 13"
+    local text = BP.serialize({ macros = {{name = "Seren T13", perChar = true, body = body}},
+        slots = {{ slot = 54, kind = "macro", value = "Seren T13" }} })
+    -- Even an action ID that coincides with a real, unrelated account macro is unsafe.
+    w.macroActionID = CreateMacro("Shared", 42, "/dance", false)
+    apply(text)
+    local undo = P.active().undo
+    local summary, full = BP.run(text, true)
+    has(summary, "Check OK")
+    has(full, "0 to fill, 0 to clear, 1 already right")
+    has(BP.run(text, false), "Done: 0 slots filled, 1 already right")
+    assert(idAt(54) == "Seren T13" and P.active().undo == undo)
+    local exported = assert(BP.parse(BP.exportCurrent()))
+    local m = exported.macros[1]
+    assert(#exported.macros == 1 and m.name == "Seren T13" and m.perChar and m.body == body)
+    reload()
+    char().slots[55] = { "macro", "Seren T13" }
+    has(BP.revert(false), "is now used on")
+    char().slots[55] = nil
+    revert()
+    assert(not idAt(54) and not w.macros["Seren T13"] and w.macros.Shared)
+end)
+
+test("unresolved and ambiguous slot macros block Check even when the action ID looks valid", function()
+    w.macroActionID = CreateMacro("Shared", 42, "/dance", false)
+    local text = plan("SLOT\t54\tclear\t")
+    char().slots[54] = { "macro" }
+    has(BP.run(text, true), "Cannot identify macro on slot 54")
+    char().slots[54] = { "macro", "Unknown" }
+    has(BP.run(text, true), "Cannot identify macro on slot 54")
+    char().slots[54] = { "macro", "Shared" }
+    CreateMacro("SHARED", 43, "/wave", true)
+    has(BP.run(text, true), "Ambiguous macro name")
+    has(BP.run(text, false), "Run Check")
+    assert(idAt(54) == "Shared" and not P.active().undo)
+end)
+
+test("changing a macro slot after Check is detected even if the action ID stays the same", function()
+    CreateMacro("Shared", 42, "/dance", false)
+    w.macroActionID = CreateMacro("Local", 43, "/wave", true)
+    char().slots[54] = { "macro", "Shared" }
+    local text = plan("SLOT\t54\tclear\t")
+    local before = BP.changes.slot(54)
+    assert(before.name == "Shared" and before.perChar == false)
+    has(BP.run(text, true), "Check OK")
+    char().slots[54] = { "macro", "Local" }
+    has(BP.run(text, false), "Run Check again.")
+    assert(idAt(54) == "Local" and not P.active().undo)
+end)
+
 local mixed = "MACRO\tAAA\t\t1\t/cast Dash\nMACRO\tZZZ\t15\t1\t/cast Wrath\n"
     .. "SLOT\t1\tmacro\tAAA\nSLOT\t2\tclear\t\nENSURE\tR\tBUTTON\nREMOVE\tB\tPACK"
 local function mixedApply()
@@ -311,6 +370,7 @@ for _, case in ipairs({
 end
 
 test("game rejecting a late slot write rolls back macros, bindings and earlier slots", function()
+    w.macroActionID = 53
     spell(1, 1); spell(2, 1)
     local text = plan("MACRO\tABC\t\t1\t/dance\nSLOT\t1\tmacro\tABC\nSLOT\t2\tspell\tWrath\nENSURE\tB\tBUTTON")
     has(BP.run(text, true), "Check OK")
