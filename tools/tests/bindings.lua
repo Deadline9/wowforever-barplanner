@@ -419,13 +419,18 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
         assert(button.enabled and button.visible ~= false, label)
         button.scripts.OnClick(button)
     end
-    local slotsOnly = BP.serialize({ slots = {{slot = 1, kind = "clear", value = ""}} })
+    -- An accepted line break makes the stored text distinct from a reserialized plan.
+    local slotsOnly = "BP2:\n" .. BP.b64encode("BARPLAN\t2\nSLOT\t1\tclear\t")
     window.edit:SetText(slotsOnly)
     assert(not buttons.Apply.enabled and window.hint.text == "Run Check before Apply.")
     BP.run(slotsOnly, false)
     assert(slotEdits == 0)
     click("Check")
     assert(buttons.Apply.enabled)
+    local draftReport = window.status.text
+    click("Last applied plan")
+    assert(window.hint.text == "No plan applied yet." and window.edit.text == slotsOnly)
+    assert(buttons.Apply.enabled and window.status.text == draftReport and BarsmithDB.last == nil)
     window.edit:SetText(slotsOnly .. " ")
     window.edit:SetText(slotsOnly)
     assert(not buttons.Apply.enabled)
@@ -470,6 +475,25 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     assert(not buttons.Apply.enabled and window.status.text:find("competing instructions"))
     click("Details")
     assert(window.status.text:find("competing instructions"))
+
+    -- Recover the successful Apply, even after a later Apply was rejected.
+    local cursorClears = clears
+    UnitName = function() return "Tester" end
+    click("Export setup")
+    assert(BP.parse(window.edit.text).name == "Tester (from game)")
+    click("Census")
+    assert(window.edit.text:sub(1, 4) == "BC1:")
+    click("Last applied plan")
+    assert(BarsmithDB.last == slotsOnly and window.edit.text == slotsOnly and window.edit.selected == slotsOnly)
+    assert(not buttons.Apply.enabled)
+    SlashCmdList.BARSMITH("apply")
+    assert(window.edit.text == slotsOnly and buttons.Apply.enabled and window.status.text:find("Check OK", 1, true))
+    click("Last applied plan")
+    assert(not buttons.Apply.enabled)
+    BP.run(slotsOnly, false)
+    assert(window.status.text:find("Run Check before Apply.", 1, true))
+    assert(slotEdits == 1 and clears == cursorClears and #writes == 0 and saves == 0)
+    UnitName = nil
 end)
 print(passed .. " passed, " .. failures .. " failed")
 assert(failures == 0)
