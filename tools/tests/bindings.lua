@@ -424,6 +424,7 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     end
     function methods:GetText() return self.text end
     function methods:HookScript(event, handler) self.scripts[event] = handler end
+    function methods:SetWidth(width) self.width = width end
     function methods:SetSize(width, height) self.width, self.height = width, height end
     function methods:SetPoint(point, x, y) self.anchor, self.x, self.y = point, x, y end
     function methods:SetScript(event, handler) self.scripts[event] = handler end
@@ -454,6 +455,14 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
             right = b.x + b.width + 4
         end
     end
+    local auto = window.auto
+    local policy = labels["Auto-overwrite occupied managed slots for newly available actions"]
+    local autoLabel = labels["Auto-fill new spells"]
+    assert(auto.anchor == "BOTTOMLEFT" and policy.x.y == auto.y)
+    assert(policy.x.x + policy.x.width + 2 + policy.width + 4 <= auto.x)
+    assert(autoLabel.x == auto and auto.x + auto.width + 2 + autoLabel.width <= window.width - 10)
+    assert(buttons.Clear.y + buttons.Clear.height + 4 <= auto.y)
+    assert(auto.y + auto.height + 4 <= buttons["Review pending updates"].y)
     local legacy, managed = buttons["Import old plan"], buttons["Managed bars..."]
     assert(legacy.y + legacy.height < managed.y and legacy.x + legacy.width <= window.width - 10)
     for _, label in ipairs({ "Import old plan", "Census", "Revert last Apply", "Review pending updates" }) do
@@ -626,6 +635,14 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     StaticPopup_OnClick(popup, 1)
     assert(labels["Seren Grey"] and selector.Text:GetText() == "Leveling")
     assert(character.active == "Leveling" and buttons["Import old plan"].visible)
+    local draft = BP.profiles.active()
+    local editCount, writeCount, saveCount = slotEdits, #writes, saves
+    click("Last applied plan")
+    assert(window.edit.selected == imported and window.status.text:find("pre%-profile") and not buttons.Apply.enabled)
+    SlashCmdList.BARSMITH("apply")
+    assert(window.edit.text == imported and buttons.Apply.enabled and window.status.text:find("Check OK"))
+    assert(window.status.text:find("pre%-profile") and not draft.lastApplied and BarsmithDB.legacyPlan == imported)
+    assert(slotEdits == editCount and #writes == writeCount and saves == saveCount)
     prompt("Rename", "Rename profile:", "Rename", "Leveling")
     input:SetText("Default")
     enter()
@@ -665,10 +682,16 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     assert(not popup.visible and character.active == longName and not character.profiles["Stale rename"])
     openSelector()
     root.children.Default.click()
+    local active = BP.profiles.active()
+    assert(active.lastApplied and active.lastApplied ~= imported)
+    click("Last applied plan")
+    assert(window.edit.selected == active.lastApplied and not buttons.Apply.enabled)
+    SlashCmdList.BARSMITH("apply")
+    assert(window.edit.text == active.lastApplied and buttons.Apply.enabled and BarsmithDB.legacyPlan == imported)
     click("Import old plan")
     assert(window.edit:GetText() == imported and BarsmithDB.legacyPlan == imported and not buttons.Apply.enabled)
     click("Check"); click("Apply")
-    assert(not BarsmithDB.legacyPlan and not buttons["Import old plan"].visible)
+    assert(active.lastApplied == imported and not BarsmithDB.legacyPlan and not buttons["Import old plan"].visible)
 
     -- Long profile lists remain selectable by name. A foreign row can only copy.
     for i = 1, 80 do character.profiles["Layout " .. i] = {} end

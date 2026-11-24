@@ -1096,6 +1096,15 @@ local function askProfileName(op, editorText)
     if not dialog then showStatus({ "Close another dialog and try again." }) end
 end
 
+local LEGACY_HELP = "Preserved pre-profile applied plan. Its owner is unknown. Check and successfully Apply it on the intended character and profile to claim it."
+
+local function appliedPlan()
+    local profile = P.active()
+    if profile and profile.lastApplied and profile.lastApplied ~= "" then return profile.lastApplied end
+    local legacy = BarsmithDB and BarsmithDB.legacyPlan
+    if legacy and legacy ~= "" then return legacy, LEGACY_HELP end
+end
+
 local function buildFrame()
     local f = CreateFrame("Frame", "BarsmithFrame", UIParent, "BasicFrameTemplateWithInset")
     f:SetSize(620, 558)
@@ -1212,13 +1221,12 @@ local function buildFrame()
     f.exportSetup = exportSetup
     button("Export setup", 160, 117, exportSetup)
     button("Last applied plan", 281, 124, function()
-        local profile = P.active()
-        local last = profile and profile.lastApplied
-        if not last or last == "" then
+        local last, help = appliedPlan()
+        if not last then
             f.hint:SetText("No plan applied yet.")
             return
         end
-        selectText(last, "Last applied plan. Press Ctrl+C to copy, or Check to review it for reapplication.")
+        selectText(last, help or "Last applied plan. Press Ctrl+C to copy, or Check to review it for reapplication.")
     end)
     local census = button("Census", 409, 72, function()
         local ok, snapshot = pcall(B.census, esc)
@@ -1231,9 +1239,11 @@ local function buildFrame()
 
     local auto = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
     auto:SetSize(24, 24)
-    auto:SetPoint("BOTTOMLEFT", 494, 14)
+    auto:SetPoint("BOTTOMLEFT", 448, 44)
     local autoLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     autoLabel:SetPoint("LEFT", auto, "RIGHT", 2, 0)
+    autoLabel:SetWidth(130)
+    autoLabel:SetJustifyH("LEFT")
     autoLabel:SetText("Auto-fill new spells")
     auto:SetChecked(BarsmithDB.auto)
     auto:SetScript("OnClick", function(self) setAuto(self:GetChecked() and true or false) end)
@@ -1274,6 +1284,8 @@ local function buildFrame()
     overwrite:SetPoint("BOTTOMLEFT", 16, 44)
     local policyLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     policyLabel:SetPoint("LEFT", overwrite, "RIGHT", 2, 0)
+    policyLabel:SetWidth(396)
+    policyLabel:SetJustifyH("LEFT")
     policyLabel:SetText("Auto-overwrite occupied managed slots for newly available actions")
     overwrite:SetScript("OnClick", function(self)
         local p = P.active()
@@ -1520,9 +1532,14 @@ SLASH_BARSMITH1 = "/barsmith"
 SlashCmdList.BARSMITH = function(msg)
     msg = trim(msg):lower()
     if msg == "apply" then
-        local p = P.active()
-        if p and p.lastApplied then openFrame(p.lastApplied); BP.run(p.lastApplied, true)
-        else say("No plan applied yet. Type /barsmith and paste one.") end
+        local text, help = appliedPlan()
+        if not text then return say("No plan applied yet. Type /barsmith and paste one.") end
+        openFrame(text)
+        BP.run(text, true)
+        if help then
+            table.insert(frame.summary, 1, help)
+            display("summary")
+        end
     elseif msg == "auto" then
         setAuto(not BarsmithDB.auto)
         say("Auto-fill new spells is " .. (BarsmithDB.auto and "on." or "off."))

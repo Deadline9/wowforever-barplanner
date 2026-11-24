@@ -44,7 +44,7 @@ Under **Profile → Other characters**, choose a character and a layout to copy.
 
 **Auto-fill new spells** is the existing account-wide enable switch. Its work and overwrite permission belong to the active profile on the logged-in character. Profile selection leaves WoW's binding scope alone. Check still identifies the active account-wide or character-specific set when the plan includes bindings.
 
-**Upgrading from a single saved plan.** The old `BarsmithDB.last` string identifies no character. Barsmith keeps it unassigned and preserves your Auto-fill setting. On the intended character, select the destination profile, click **Import old plan**, review **Check**, then **Apply**. A successful Apply of the original string consumes the legacy copy and hides the import button. Loading it into the editor or logging in on a same-class alt leaves it available.
+**Upgrading from a single saved plan.** The old `BarsmithDB.last` string identifies no character. Barsmith keeps it unassigned and preserves your Auto-fill setting. On the intended character, select the destination profile, click **Import old plan**, review **Check**, then **Apply**. A successful Apply of the original string consumes the legacy copy and hides the import button. Loading it into the editor or logging in on a same-class alt leaves it available. **Last applied plan** and `/barsmith apply` use this unclaimed copy when the selected profile has no applied history. The shortcut runs Check. Only successful Apply claims the copy.
 
 ### Revert last Apply
 
