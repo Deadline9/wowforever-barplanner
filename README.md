@@ -2,7 +2,9 @@
 
 Set up your WoW Forever action bars, macros and keybinds in the browser, then load them into the game with one string.
 
-**Binding-safety development branch.** Open this checkout's `index.html` and install its `addon/Barsmith` directory to review BP2. The public [upstream planner](https://rubensayshi.github.io/wowforever-barplanner/) and its downloadable addon use BP1.
+**[Open the Barsmith planner](https://deadline9.github.io/wowforever-barplanner/)** · **[Download the matching addon](https://deadline9.github.io/wowforever-barplanner/Barsmith.zip)**
+
+This BP2 fork builds on [Barsmith by Ruben (rubensayshi)](https://github.com/rubensayshi/wowforever-barplanner).
 
 - An in-game-looking screen: main bar with bars 2, 3 and 6–8 stacked on top, bars 4 and 5 on the right edge, stance bar and pet bar above.
 - Pick a class and race (only the combos Forever allows), then drag spells from that class's Forever spellbook: trainer spells, active talents and racials, with spells new in Forever marked ★. A level slider greys out spells you won't have yet.
@@ -16,7 +18,7 @@ Give your assistant the [AI Action-Bar & Keybinding Design Manual](docs/AI_KEYBI
 
 ## Getting it into the game
 
-1. Copy this branch's `addon/Barsmith` directory into `Interface/AddOns`, then reload the game. Open this branch's `index.html` in a browser.
+1. Open the [planner](https://deadline9.github.io/wowforever-barplanner/) and download [Barsmith.zip](https://deadline9.github.io/wowforever-barplanner/Barsmith.zip). Extract it into the active WoW Forever installation’s `Interface/AddOns` folder. Check that `Interface/AddOns/Barsmith/Barsmith.toc` exists, then restart the game or type `/reload`.
 2. In `/barsmith`, **Export setup** copies the current supported slots, macros and bar-planner key assignments into a BP2 plan. Press Ctrl+C and **Load** it on the page. **Census** produces a separate BC1 snapshot. Copy it and **Load** it with that plan open. Both strings can be given to an external planner.
 3. Edit bar buttons as usual. Under **Binding instructions and collision preview**, add or delete individual instructions, including secondary keys and commands from addons. Deleting an instruction leaves that relationship unmanaged. To release a key in game, add a **REMOVE** instruction naming its current owner.
 4. Copy the plan, paste it into `/barsmith` out of combat, and press **Check**. Review **Summary** for changes and warnings. Open **Details** for individual changes, skipped slots and problems. Expand **Full diagnostics** within Details to include already-correct bindings and slots, preserved keys and informational overrides. **Copy report** selects Details for Ctrl+C, including full diagnostics when expanded. Apply unlocks after a successful Check and locks again as soon as the plan text changes. **Apply** revalidates the checked binding graph before touching any slots, macros or bindings.
@@ -33,7 +35,7 @@ The game client is the authority. The web preview uses the snapshot attached to 
 | [addon/Barsmith](addon/Barsmith) | The in-game importer (`/barsmith`). |
 | [tools/build-spellbook.py](tools/build-spellbook.py) | Rebuilds the spellbook data in index.html from Forever's data: `python3 -I tools/build-spellbook.py index.html [cache-dir]` |
 | [tools/fetch-backdrops.py](tools/fetch-backdrops.py) | Downloads the race backdrops from Warcraft Wiki and shrinks them: `python3 -I tools/fetch-backdrops.py backdrops` (needs Pillow) |
-| [.github/workflows/pages.yml](.github/workflows/pages.yml) | Publishes the page, the backdrops and Barsmith.zip on every push to `main`. |
+| [.github/workflows/pages.yml](.github/workflows/pages.yml) | Publishes the planner, backdrops and matching addon ZIP from the selected commit. |
 | [LICENSE](LICENSE) | MIT license for the code. Ships in both addon zips. |
 | [.github/workflows/release.yml](.github/workflows/release.yml), [.pkgmeta](.pkgmeta) | Packages the addon and uploads it to CurseForge and GitHub Releases when a `v*` tag is pushed. |
 
@@ -80,6 +82,12 @@ Management targets ordinary persistent gameplay bindings. Context-specific comma
 Factory defaults are unavailable as a complete read-only binding graph in the inspected Forever client. Its Settings reset calls `LoadBindings(Enum.BindingSet.Default)`, which changes the active table. Barsmith never uses that path or infers defaults from unbound commands. A character's current set may be account-wide. Check labels that scope and Apply saves to precisely that active set.
 
 The capture, simulation and guarded writes live in [Bindings.lua](addon/Barsmith/Bindings.lua). Apply rechecks live ownership, the profile and detected overrides, performs only the reviewed differences, verifies the resulting graph and saves once. A write or save failure triggers best-effort restoration of attempted keys, with a recovery failure reported explicitly. A no-op performs no binding write or save. The transaction covers bindings. Slot placement and macro operations retain their existing per-operation error handling. Successful persistence across a client restart requires an in-game test.
+
+## Publishing this fork
+
+In GitHub Actions, open **Deploy to GitHub Pages**, choose **Run workflow**, select **binding-safety**, and run it. The workflow checks out that run’s commit, packages its addon with the MIT license and versioned TOC, and deploys the ZIP alongside its planner. The successful run records the deployed commit.
+
+The fork uses **Settings → Pages → Source → GitHub Actions**. Under **Settings → Environments → github-pages**, the only permitted deployment branch is `binding-safety`. Pushing development commits there does not publish them. The environment rule also prevents the inherited `main` workflow from replacing the public build.
 
 ## Verification and upstream sync
 
