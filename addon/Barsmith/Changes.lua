@@ -134,8 +134,16 @@ local function write(op, value, pickup)
     end
     local actual = C.read(op)
     -- CreateMacro can translate an icon path into its numeric file ID.
-    if not op.slot and value and type(value.icon) == "string" and actual and type(actual.icon) == "number" then
-        value.icon = actual.icon
+    if not op.slot and value and actual and type(actual.icon) == "number" then
+        -- The client reports the resolved tooltip texture for question-mark macros.
+        -- Keep exact name, body and scope verification; save the observed texture
+        -- in the transaction record so rollback and Revert compare live state.
+        if type(value.icon) == "string" or (value.icon == 134400
+            and value.body:lower():match("^%s*#showtooltip[%s\r\n]")) then
+            if actual.name == value.name and actual.body == value.body and actual.perChar == value.perChar then
+                value.icon = actual.icon
+            end
+        end
     end
     if op.slot and pickup and value.kind ~= "empty" and not value.subtype and actual.kind == value.kind then
         value.subtype = actual.subtype
