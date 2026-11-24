@@ -808,6 +808,19 @@ local function invalidate()
     refreshApply()
 end
 
+local function resetEditorReview()
+    invalidate()
+    frame.summary, frame.details, frame.full = {}, {}, {}
+    display("summary")
+end
+
+-- SetText can notify after the caller has displayed help or completed Check.
+-- Invalidate synchronously, even when loading identical text produces no event.
+local function loadEditor(text)
+    resetEditorReview()
+    frame.edit:SetText(text)
+end
+
 local function profileState(p)
     local pending = p.pending and {}
     for slot in pairs(p.pending or {}) do pending[slot] = true end
@@ -858,6 +871,7 @@ function BP.run(text, dry)
                 profile.undo = snapshot
             end
             profile.lastApplied = text
+            if BarsmithDB.last == text then BarsmithDB.last = nil end
             if BarsmithDB.legacyPlan == text then BarsmithDB.legacyPlan = nil end
         end
         return r
@@ -976,7 +990,7 @@ function BP.revert(confirm)
         local u = profile.undo
         C.execute(ops, u.bindings and u.bindings.plan, previous.preview)
         profile.text, profile.pending, profile.undo = u.before.text, u.before.pending, nil
-        if frame then frame.edit:SetText(profile.text or "") end
+        if frame then loadEditor(profile.text or "") end
         return showStatus({ "Reverted the last Apply for this profile." })
     end)
     if not ok then return showStatus({ "Revert stopped: " .. tostring(result) }) end
@@ -1101,6 +1115,8 @@ local LEGACY_HELP = "Preserved pre-profile applied plan. Its owner is unknown. C
 local function appliedPlan()
     local profile = P.active()
     if profile and profile.lastApplied and profile.lastApplied ~= "" then return profile.lastApplied end
+    local newer = BarsmithDB and BarsmithDB.last
+    if newer and newer ~= "" then return newer, LEGACY_HELP end
     local legacy = BarsmithDB and BarsmithDB.legacyPlan
     if legacy and legacy ~= "" then return legacy, LEGACY_HELP end
 end
@@ -1196,19 +1212,15 @@ local function buildFrame()
     f.apply = button("Apply", 88, 68, function() edit:ClearFocus(); BP.run(edit:GetText(), false) end)
     f.apply:Disable()
     f.hint:SetText(CHECK_HINT)
-    edit:SetScript("OnTextChanged", function()
-        invalidate()
-        f.summary, f.details, f.full = {}, {}, {}
-        display("summary")
-        refreshApply()
+    edit:SetScript("OnTextChanged", function(_, userInput)
+        if userInput then resetEditorReview() end
     end)
     local function exportHelp(msg)
         f.summary, f.details, f.full = { msg }, { msg }, { msg }
         display("summary")
     end
     local function selectText(text, helpText)
-        edit:SetText(text)
-        refreshApply()
+        loadEditor(text)
         edit:SetFocus()
         edit:HighlightText()
         exportHelp(helpText)
@@ -1233,7 +1245,7 @@ local function buildFrame()
         if not ok then showStatus({ "Census failed: " .. tostring(snapshot) }); return end
         selectText(snapshot, "Copy this read-only BC1 census. Load it into the planner with your plan open.")
     end)
-    button("Clear", 485, 55, function() edit:SetText(""); edit:SetFocus() end)
+    button("Clear", 485, 55, function() loadEditor(""); edit:SetFocus() end)
 
     tooltip(census, "Creates a read-only snapshot of current WoW keybindings, including detectable secondary and addon bindings. Use it with the planner or an AI assistant to avoid conflicts.")
 
@@ -1274,7 +1286,7 @@ local function buildFrame()
     button("Managed bars...", 478, 126, function(self) MenuUtil.CreateContextMenu(self, managedBarsMenu) end, 478)
     local legacy = button("Import old plan", 478, 126, function()
         if BarsmithDB.legacyPlan then
-            edit:SetText(BarsmithDB.legacyPlan)
+            loadEditor(BarsmithDB.legacyPlan)
             showStatus({ "Legacy account plan loaded for review. Check and Apply on the owning character." })
         end
     end, 447)
@@ -1294,8 +1306,8 @@ local function buildFrame()
         if p and p.overwrite and BarsmithDB.auto then queueAutoFill() end
     end)
     refreshProfiles = function()
-        if BarsmithDB and BarsmithDB.legacyPlan then legacy:Show() else legacy:Hide() end
         local p, c = P.active()
+        if BarsmithDB and BarsmithDB.legacyPlan then legacy:Show() else legacy:Hide() end
         if not p then return end
         characterLabel:SetText(c.name or "Current character")
         selector:OverrideText(c.active)
@@ -1338,7 +1350,7 @@ local function openFrame(text)
     end
     refreshProfiles()
     frame.auto:SetChecked(BarsmithDB.auto)
-    if text then frame.edit:SetText(text) end
+    if text then loadEditor(text) end
     frame:Show()
 end
 
@@ -1483,7 +1495,7 @@ P.onChange = function()
     if StaticPopup_Hide then StaticPopup_Hide("BARSMITH_LEVEL_UPDATES") end
     if frame then
         local profile = P.active()
-        frame.edit:SetText(profile.text or "")
+        loadEditor(profile.text or "")
         refreshProfiles()
     end
 end

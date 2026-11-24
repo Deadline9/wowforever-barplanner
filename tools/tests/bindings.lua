@@ -416,11 +416,15 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     methods.CreateTexture = widget
     function methods:SetupMenu(build) self.build = build end
     function methods:OverrideText(value) self.Text:SetText(value) end
+    local pendingEditorChanges = 0
     function methods:SetText(value)
+        local changed = self.text ~= value
         self.text = value
         if self.kind == "Button" then buttons[value] = self end
         if self.kind == "FontString" then labels[value] = self end
-        if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, false) end
+        if window and self == rawget(window, "edit") then
+            if changed then pendingEditorChanges = pendingEditorChanges + 1 end
+        elseif self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, false) end
     end
     function methods:GetText() return self.text end
     function methods:HookScript(event, handler) self.scripts[event] = handler end
@@ -435,10 +439,19 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     function methods:HighlightText() self.selected = self.text end
     CreateFrame, UISpecialFrames, tinsert = widget, {}, table.insert
     SlashCmdList.BARSMITH("")
+    local function deliverChanges()
+        for i = 1, pendingEditorChanges do window.edit.scripts.OnTextChanged(window.edit, false) end
+        pendingEditorChanges = 0
+    end
+    local function userEdit(text)
+        window.edit.text = text
+        window.edit.scripts.OnTextChanged(window.edit, true)
+    end
     local function click(label)
         local button = buttons[label]
         assert(button.enabled and button.visible ~= false, label)
         button.scripts.OnClick(button)
+        deliverChanges()
     end
     assert(selector and not buttons["Select profile"] and labels[UnitName("player")] and labels["Profile:"])
     assert(selector.Text:GetText() == "Default" and selector.width >= 300)
@@ -470,7 +483,7 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     end
     -- An accepted line break makes the stored text distinct from a reserialized plan.
     local slotsOnly = "BP2:\n" .. BP.b64encode("BARPLAN\t2\nSLOT\t1\tclear\t")
-    window.edit:SetText(slotsOnly)
+    userEdit(slotsOnly)
     assert(not buttons.Apply.enabled and window.hint.text == "Run Check before Apply.")
     BP.run(slotsOnly, false)
     assert(slotEdits == 0)
@@ -480,15 +493,15 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     click("Last applied plan")
     assert(window.hint.text == "No plan applied yet." and window.edit.text == slotsOnly)
     assert(buttons.Apply.enabled and window.status.text == draftReport and BP.profiles.active().lastApplied == nil)
-    window.edit:SetText(slotsOnly .. " ")
-    window.edit:SetText(slotsOnly)
+    userEdit(slotsOnly .. " ")
+    userEdit(slotsOnly)
     assert(not buttons.Apply.enabled)
     BP.run(slotsOnly, false)
     assert(slotEdits == 0)
     click("Check")
     click("Apply")
     assert(slotEdits == 1 and not buttons.Apply.enabled)
-    window.edit:SetText(BP.serialize({ binds = {{ key = "B", command = "BUTTON" }, { key = "R", command = "RUN" }} }))
+    userEdit(BP.serialize({ binds = {{ key = "B", command = "BUTTON" }, { key = "R", command = "RUN" }} }))
     click("Check")
     local warning = "Warning: PACK will be unbound: B to BUTTON."
     assert(buttons.Apply.enabled and window.status.text:find(warning, 1, true))
@@ -519,7 +532,7 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     owners.B = "ADDON"
     click("Apply")
     assert(not buttons.Apply.enabled and #writes == 0 and window.status.text:find("Run Check again."))
-    window.edit:SetText(BP.serialize({ binds = {{ key = "B", command = "BUTTON" }, { key = "B", command = "RUN" }} }))
+    userEdit(BP.serialize({ binds = {{ key = "B", command = "BUTTON" }, { key = "B", command = "RUN" }} }))
     click("Check")
     assert(not buttons.Apply.enabled and window.status.text:find("competing instructions"))
     click("Details")
@@ -530,13 +543,17 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     local originalUnitName = UnitName
     UnitName = function() return "Tester" end
     click("Export setup")
+    assert(window.status.text:find("BP2 setup:", 1, true))
     assert(BP.parse(window.edit.text).name == "Tester (from game)")
     click("Census")
+    assert(window.status.text:find("Copy this read-only BC1 census", 1, true))
     assert(window.edit.text:sub(1, 4) == "BC1:")
     click("Last applied plan")
+    assert(window.status.text:find("Last applied plan. Press Ctrl+C", 1, true))
     assert(BP.profiles.active().lastApplied == slotsOnly and window.edit.text == slotsOnly and window.edit.selected == slotsOnly)
     assert(not buttons.Apply.enabled)
     SlashCmdList.BARSMITH("apply")
+    deliverChanges()
     assert(window.edit.text == slotsOnly and buttons.Apply.enabled and window.status.text:find("Check OK", 1, true))
     click("Last applied plan")
     assert(not buttons.Apply.enabled)
@@ -547,7 +564,7 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     -- Use the actual window controls to save a draft, apply, preview/cancel
     -- Revert, confirm it, and delete the profile.
     local plan = BP.serialize({ binds = {{ key = "B", command = "BUTTON" }} })
-    window.edit:SetText(plan)
+    userEdit(plan)
     local popup, input, action
     StaticPopup_Show = function(key, prompt, _, data)
         local def = assert(StaticPopupDialogs[key])
@@ -573,11 +590,11 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     local function enter()
         popup.definition.EditBoxOnEnterPressed(input)
     end
-    window.edit:SetText(BP.serialize({ name = "Seren (from game)", slots = {} }))
+    userEdit(BP.serialize({ name = "Seren (from game)", slots = {} }))
     prompt("Save new", "New profile name:", "Save", "")
     popup.definition.EditBoxOnEscapePressed(input)
     assert(not popup.visible and selector.Text:GetText() == "Default")
-    window.edit:SetText(plan)
+    userEdit(plan)
     prompt("Save new", "New profile name:", "Save", "")
     input:SetText("Healing")
     enter()
@@ -629,7 +646,7 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     BP.profiles.init()
     openSelector()
     assert(root.title == "Seren Grey" and root.limit and root.children.Default.selected())
-    window.edit:SetText(imported)
+    userEdit(imported)
     prompt("Save new", "New profile name:", "Save", "Leveling")
     assert(character.active == "Default")
     StaticPopup_OnClick(popup, 1)
@@ -640,9 +657,25 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     click("Last applied plan")
     assert(window.edit.selected == imported and window.status.text:find("pre%-profile") and not buttons.Apply.enabled)
     SlashCmdList.BARSMITH("apply")
+    deliverChanges()
     assert(window.edit.text == imported and buttons.Apply.enabled and window.status.text:find("Check OK"))
     assert(window.status.text:find("pre%-profile") and not draft.lastApplied and BarsmithDB.legacyPlan == imported)
     assert(slotEdits == editCount and #writes == writeCount and saves == saveCount)
+    local newer = " " .. BP.serialize({name = "Newer", slots = {}}) .. "\n"
+    BarsmithDB.last = newer
+    click("Last applied plan")
+    assert(window.edit.selected == newer and window.status.text:find("pre%-profile") and not buttons.Apply.enabled)
+    SlashCmdList.BARSMITH("apply")
+    deliverChanges()
+    assert(window.edit.text == newer and buttons.Apply.enabled and window.status.text:find("Check OK"))
+    assert(not draft.lastApplied and BarsmithDB.last == newer and BarsmithDB.legacyPlan == imported)
+    assert(slotEdits == editCount and #writes == writeCount and saves == saveCount)
+    click("Apply")
+    assert(draft.lastApplied == newer and not BarsmithDB.last and BarsmithDB.legacyPlan == imported)
+    click("Import old plan")
+    assert(window.edit.text == imported and not buttons.Apply.enabled)
+    click("Last applied plan")
+    assert(window.edit.selected == newer and not window.status.text:find("pre%-profile"))
     prompt("Rename", "Rename profile:", "Rename", "Leveling")
     input:SetText("Default")
     enter()
@@ -683,15 +716,17 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     openSelector()
     root.children.Default.click()
     local active = BP.profiles.active()
-    assert(active.lastApplied and active.lastApplied ~= imported)
+    BarsmithDB.last = newer
+    assert(active.lastApplied and active.lastApplied ~= imported and active.lastApplied ~= newer)
     click("Last applied plan")
     assert(window.edit.selected == active.lastApplied and not buttons.Apply.enabled)
     SlashCmdList.BARSMITH("apply")
+    deliverChanges()
     assert(window.edit.text == active.lastApplied and buttons.Apply.enabled and BarsmithDB.legacyPlan == imported)
     click("Import old plan")
     assert(window.edit:GetText() == imported and BarsmithDB.legacyPlan == imported and not buttons.Apply.enabled)
     click("Check"); click("Apply")
-    assert(active.lastApplied == imported and not BarsmithDB.legacyPlan and not buttons["Import old plan"].visible)
+    assert(active.lastApplied == imported and BarsmithDB.legacyPlan == newer and buttons["Import old plan"].visible)
 
     -- Long profile lists remain selectable by name. A foreign row can only copy.
     for i = 1, 80 do character.profiles["Layout " .. i] = {} end
