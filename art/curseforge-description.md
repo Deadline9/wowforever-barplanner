@@ -28,7 +28,7 @@ Apply creates or updates the plan's macros, puts spells, macros + items on their
 ## Known issues
 
 - **Not tested on the Forever client yet.** I tried it on WoW Classic, where it worked fine, and the rest is checked against a mock of the WoW API, so expect some funkyness. Make a backup of your `WTF` folder if you're attached to your current setup
-- Some bar addons switch the main bar for Shadowform, Moonkin Form or Prowl where Forever itself doesn't. The addon copies the right buttons onto those pages too, but I haven't checked that in game yet
+- Some bar addons switch the main bar for Shadowform, Moonkin Form or Prowl where Forever itself doesn't. Include explicit SLOT records for any alternate buttons that the profile should manage
 - Bars and keys can't be changed in combat (the game doesn't allow it), so Apply asks you to try again after the fight. Auto-fill just catches up once you're out of combat
 
 If something comes out wrong, a comment with your class, your plan string and what you expected vs what you got helps a lot. Which class is broken for you?

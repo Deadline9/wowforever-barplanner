@@ -45,6 +45,9 @@ if (legacy) {
   el("convert").click();
   assert.ok(el("out").value.startsWith("BP2:"));
 }
+plan("SLOT\t109\tclear\t", "SLOT\t85\tspell\tGhost Wolf");
+const alternateSlots = Buffer.from(el("out").value.slice(4), "base64").toString();
+assert.ok(alternateSlots.includes("SLOT\t109\tclear\t") && alternateSlots.includes("SLOT\t85\tspell\tGhost Wolf"));
 plan("ENSURE\tR\tRUN");
 census(row("RUN", "R", "NUMLOCK"));
 check("Preserved on RUN: NUMLOCK");

@@ -10,7 +10,7 @@ This BP2 fork builds on [Barsmith by Ruben (rubensayshi)](https://github.com/rub
 - Pick a class and race (only the combos Forever allows), then drag spells from that class's Forever spellbook: trainer spells, active talents and racials, with spells new in Forever marked ★. A level slider greys out spells you won't have yet.
 - Write macros, plan the main bar once per stance or form that swaps it (warrior stances, Cat and Bear Form, Stealth) and on its page 2 (Shift+2), and bind keys in keybind mode (hover a button, press a key).
 - Keep as many plans per class as you like. They're saved in your browser; the plan string moves them anywhere else.
-- Works with EllesmereUI, Bartender4, Dominos and ElvUI: they show the game's normal bar slots and pass its keybinds on to their own buttons. Those three number bars by action page, so Bar 2 here is their bar 6, Bar 3 is 5, Bar 4 is 3, Bar 5 is 4 and Bars 6–8 are 13–15 (Dominos: 12–14). Some of them also switch the main bar for Shadowform, Moonkin Form or Prowl where the game doesn't, so the addon copies the right buttons onto those pages too.
+- Works with EllesmereUI, Bartender4, Dominos and ElvUI: they show the game's normal bar slots and pass its keybinds on to their own buttons. Those three number bars by action page, so Bar 2 here is their bar 6, Bar 3 is 5, Bar 4 is 3, Bar 5 is 4 and Bars 6–8 are 13–15 (Dominos: 12–14). Some of them also switch the main bar for Shadowform, Moonkin Form or Prowl where the game doesn't, so include explicit SLOT records for any of those alternate buttons you want the profile to manage.
 
 ## Designing bars and keybindings with an AI assistant
 
@@ -22,7 +22,37 @@ Give your assistant the [AI Action-Bar & Keybinding Design Manual](docs/AI_KEYBI
 2. In `/barsmith`, **Export setup** copies the current supported slots, macros and bar-planner key assignments into a BP2 plan. Press Ctrl+C and **Load** it on the page. **Census** produces a separate BC1 snapshot. Copy it and **Load** it with that plan open. Both strings can be given to an external planner.
 3. Edit bar buttons as usual. Under **Binding instructions and collision preview**, add or delete individual instructions, including secondary keys and commands from addons. Deleting an instruction leaves that relationship unmanaged. To release a key in game, add a **REMOVE** instruction naming its current owner.
 4. Copy the plan, paste it into `/barsmith` out of combat, and press **Check**. Review **Summary** for changes and warnings. Open **Details** for individual changes, skipped slots and problems. Expand **Full diagnostics** within Details to include already-correct bindings and slots, preserved keys and informational overrides. **Copy report** selects Details for Ctrl+C, including full diagnostics when expanded. Apply unlocks after a successful Check and locks again as soon as the plan text changes. **Apply** revalidates the checked binding graph before touching any slots, macros or bindings.
-5. To recover the exact plan Barsmith last applied, click **Last applied plan**. It selects the stored string for Ctrl+C, including instructions that a live **Export setup** cannot reconstruct, such as clears and future spells. Loading it leaves your bars and bindings alone. To reapply it, run **Check**, review the report, then click **Apply**. The shortcut `/barsmith apply` loads the same stored plan and runs **Check** for you. Auto-fill still places learned spells into empty planned slots.
+5. To recover the exact plan Barsmith last successfully applied on the selected profile, click **Last applied plan**. It selects the stored string for Ctrl+C, including instructions that a live **Export setup** cannot reconstruct, such as clears and future spells. Loading it leaves your bars and bindings alone. To reapply it, run **Check**, review the report, then click **Apply**. The shortcut `/barsmith apply` loads the same stored plan and runs **Check** for you. Auto-fill still places learned spells into empty planned slots.
+
+
+## Character profiles and leveling
+
+Click the profile name beside **Profile:** to switch layouts. The menu lists the logged-in character’s layouts first and marks the active one. The header shows the character (for example, **Seren Grey**) separately from the selected layout (**Leveling**). Profiles belong to the character's GUID, so a rename updates the display and keeps the layouts. Each character starts with **Default**.
+
+Choose **Save new** to name and save the plan in the editor. The dialog suggests the imported plan’s `NAME` when available. **Rename** opens with the current name selected. **Duplicate** suggests a copy name you can edit. Delete asks for confirmation and keeps at least one profile per character.
+
+Under **Profile → Other characters**, choose a character and a layout to copy. Barsmith opens an independent draft on the current character, using a numbered suffix if the name already exists. The draft carries the plan and bar exclusions. Future overwrite permission starts off. Check and Apply the draft before Auto-fill can use it. A different-class plan keeps its class and spells for editing in the planner or with an AI assistant.
+
+**Managed bars...** lets you reserve a bar or form page for manual use. Clear its checkbox to exclude its action slots from Check/Apply placements, leveling updates, and Revert. Existing profiles start with every page enabled, and Barsmith still places actions only on explicit `SLOT` destinations. Changing a checkbox invalidates the current review. Bindings for buttons on that page and explicit macro definitions still follow their own plan records. Revert honors the current exclusions, even if a bar was managed when you applied the plan.
+
+| Situation | What happens |
+|---|---|
+| Check finds occupied managed slots | Summary counts immediate and future replacements separately. Details identifies each slot, its current contents and the planned action. **Apply** approves the immediate batch and rechecks it against live state. |
+| A planned spell is learned or an item arrives | With Auto-fill enabled, empty managed slots fill automatically. Only explicit `SLOT` destinations participate, including on alternate form pages. |
+| A previously unavailable action would replace an occupied slot | One prompt covers the batch. Choose **Review batch**, inspect **Details**, then **Approve batch**, or choose **Later**. **Review pending updates** reopens postponed replacements. A changed batch needs a fresh review. |
+| This profile should handle future collisions automatically | Enable **Auto-overwrite occupied managed slots for newly available actions**. Once a placement is fulfilled, later events leave occupied slots alone. Empty spell and item slots remain eligible for refill. |
+
+**Auto-fill new spells** is the existing account-wide enable switch. Its work and overwrite permission belong to the active profile on the logged-in character. Profile selection leaves WoW's binding scope alone. Check still identifies the active account-wide or character-specific set when the plan includes bindings.
+
+**Upgrading from a single saved plan.** The old `BarsmithDB.last` string identifies no character. Barsmith keeps it unassigned and preserves your Auto-fill setting. On the intended character, select the destination profile, click **Import old plan**, review **Check**, then **Apply**. A successful Apply of the original string consumes the legacy copy and hides the import button. Loading it into the editor or logging in on a same-class alt leaves it available.
+
+### Revert last Apply
+
+Click **Revert last Apply**, inspect **Details**, then click **Confirm revert**. Each profile keeps one snapshot of its last state-changing manual Apply. It restores changed action slots, macro bodies/icons and scope, affected key relationships, and the profile's previous saved plan and pending leveling placements. A no-op Apply preserves the snapshot. Leveling updates do not replace it. Revert restores the earlier working plan. **Last applied plan** still retrieves the exact input of the most recent successful manual Apply, including a no-op. New and copied drafts have no applied history.
+
+Revert checks the live result again at confirmation. A changed slot, modified macro, changed binding set or conflicting key stops the batch. An unrelated key or slot can change independently. Barsmith also checks whether a newly created macro has acquired other slot or key references. After Barsmith observes a character switch, it blocks deletion of a newly created **account** macro because the current character cannot inspect the other character's bars.
+
+Barsmith can restore empty slots, available spells and items, and uniquely identified macros. If a replacement would remove an action it cannot recreate, Check identifies the slot and stops before writing. A spent item or forgotten spell can also become unavailable between Apply and Revert. Snapshots cover the changes made by that Apply. Later leveling placements in other slots are outside the snapshot.
 
 The game client is the authority. The web preview uses the snapshot attached to the current plan. Browser storage on this branch imports earlier saved plans and keeps its own copy.
 
@@ -81,7 +111,7 @@ Management targets ordinary persistent gameplay bindings. Context-specific comma
 
 Factory defaults are unavailable as a complete read-only binding graph in the inspected Forever client. Its Settings reset calls `LoadBindings(Enum.BindingSet.Default)`, which changes the active table. Barsmith never uses that path or infers defaults from unbound commands. A character's current set may be account-wide. Check labels that scope and Apply saves to precisely that active set.
 
-The capture, simulation and guarded writes live in [Bindings.lua](addon/Barsmith/Bindings.lua). Apply rechecks live ownership, the profile and detected overrides, performs only the reviewed differences, verifies the resulting graph and saves once. A write or save failure triggers best-effort restoration of attempted keys, with a recovery failure reported explicitly. A no-op performs no binding write or save. The transaction covers bindings. Slot placement and macro operations retain their existing per-operation error handling. Successful persistence across a client restart requires an in-game test.
+The capture, simulation and guarded writes live in [Bindings.lua](addon/Barsmith/Bindings.lua). Apply rechecks live ownership, the profile and detected overrides, performs only the reviewed differences, verifies the resulting graph and saves once. A write or save failure triggers best-effort restoration of attempted keys, with a recovery failure reported explicitly. A no-op performs no binding write or save. The addon verifies slot and macro writes too. A failure triggers best-effort rollback of the batch, including successfully changed bindings, and reports incomplete recovery. Successful persistence across a client restart requires an in-game test.
 
 ## Publishing this fork
 
@@ -91,7 +121,7 @@ The fork uses **Settings → Pages → Source → GitHub Actions**. Under **Sett
 
 ## Verification and upstream sync
 
-From the repository root, run the addon suite with `lua tools/tests/bindings.lua` or `texlua tools/tests/bindings.lua`. The planner suite runs with Node and jsdom 26. The optional HTML argument exercises the original upstream example and browser-storage migration.
+From the repository root, run both addon suites with `texlua tools/tests/bindings.lua` and `texlua tools/tests/profiles.lua` (or use `lua` for either). The planner suite runs with Node and jsdom 26. The optional HTML argument exercises the original upstream example and browser-storage migration.
 
 ```sh
 git show 3163d36:index.html > /tmp/barsmith-upstream.html
@@ -122,7 +152,7 @@ Binding behavior was checked against the [Forever 1.60.1 UI source, build 71037]
 Read 2026-11-01.
 
 - EllesmereUI source (retail 7.2.2, April 2026): https://github.com/Anysu94/EllesmereUI . `EllesmereUIActionBars/EllesmereUIActionBars.lua` maps Bar 1–8 to the standard action pages (slots 1–12, 61, 49, 25, 37, 145, 157, 169) and binding commands ACTIONBUTTON / MULTIACTIONBAR1–7BUTTON. Not checked against the Forever build.
-- Bartender4 (https://github.com/Nevcairiel/Bartender4, 8339c74, 2026-10-02), Dominos (https://github.com/tullamods/Dominos, 6653640, 2026-10-31) and ElvUI (https://github.com/tukui-org/ElvUI, 1fe8b7e, 2026-10-31), read 2026-11-01. All three list interface 16001 and have Forever code paths. Bar N shows slots (N−1)×12+1 (Dominos skips bar 12's slots, so its 12–14 are slots 145–180), and bars 1, 3–6 and 13–15 (Dominos 12–14) pass the game's ACTIONBUTTON / MULTIACTIONBAR1–7BUTTON keys on to their buttons with override bindings (Bartender4 `ActionBars.lua` BINDING_MAPPINGS, Dominos `bars/actionBar/button.lua`, ElvUI `Modules/ActionBars/ActionBars.lua` barDefaults). Their default main bar paging on Forever: Bartender4 Prowl → slots 85–96 (`StateBar.lua`, `ActionBars.lua`); Dominos Shadowform → 73–84 and Moonkin Form → 109–120 (`core/barStates/Camelot.lua`, `bars/actionBar/bar.lua`); ElvUI Shadowform → 73–84 and Prowl → 85–96 (`Defaults/Profile.lua` bar1 paging). The addon fills those pages with copies (`COPY_PAGES` in Barsmith.lua).
+- Bartender4 (https://github.com/Nevcairiel/Bartender4, 8339c74, 2026-10-02), Dominos (https://github.com/tullamods/Dominos, 6653640, 2026-10-31) and ElvUI (https://github.com/tukui-org/ElvUI, 1fe8b7e, 2026-10-31), read 2026-11-01. All three list interface 16001 and have Forever code paths. Bar N shows slots (N−1)×12+1 (Dominos skips bar 12's slots, so its 12–14 are slots 145–180), and bars 1, 3–6 and 13–15 (Dominos 12–14) pass the game's ACTIONBUTTON / MULTIACTIONBAR1–7BUTTON keys on to their buttons with override bindings (Bartender4 `ActionBars.lua` BINDING_MAPPINGS, Dominos `bars/actionBar/button.lua`, ElvUI `Modules/ActionBars/ActionBars.lua` barDefaults). Their default main bar paging on Forever: Bartender4 Prowl → slots 85–96 (`StateBar.lua`, `ActionBars.lua`); Dominos Shadowform → 73–84 and Moonkin Form → 109–120 (`core/barStates/Camelot.lua`, `bars/actionBar/bar.lua`); ElvUI Shadowform → 73–84 and Prowl → 85–96 (`Defaults/Profile.lua` bar1 paging). An applied profile can target those pages with explicit SLOT records.
 - EllesmereUI on Forever: https://www.icy-veins.com/wow-forever/news/wow-forever-players-can-now-build-their-perfect-ui-with-ellesmereui/ (403 when fetched; title from search results)
 - ForeverSVFix release notes (SavedVariables loading bug, EllesmereUI profiles): https://github.com/nobewayo/ForeverSVFix/releases
 - EUI Tweaks (lists game version 1.60.1): https://www.curseforge.com/wow/addons/eui-tweaks

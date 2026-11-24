@@ -638,6 +638,8 @@ WoW keybinding guidance similarly recommends maintaining consistent functions ac
 
 Barsmith layouts can be character-specific, but WoW's underlying keybinding set may be **account-wide** or **character-specific**. The Binding Census records the active binding context, and Check/Apply operate on that active set. Never assume a binding change is isolated to the current character merely because the action-bar contents are character-specific.
 
+In the addon's profile manager, confirm the displayed character and active layout before Check. The profile’s Managed bars settings can exclude action slots independently of binding instructions. Selecting a profile loads its saved plan for review. Apply approves the reviewed batch in the current WoW binding set. A character may have separate leveling and healing profiles with different future-slot overwrite preferences.
+
 For a player setting up multiple characters, prefer a layered model:
 
 1. Establish a clean **account-wide baseline** first. It should contain universal controls the player wants everywhere and a reusable physical **key -> action-button command** geometry for a reasonable number of useful bar positions.
@@ -694,7 +696,7 @@ Do not sacrifice a materially better state-specific layout merely to create supe
 
 Inspect the Export setup rather than guessing which slots/pages are actually used.
 
-Let Barsmith handle its supported compatibility-copy behavior for action-bar addons. Do not manually invent hidden compatibility pages unless the current plan/export requires them.
+Only explicit `SLOT` records authorize placement on a form page. If a bar addon needs a copy on a different physical page, establish its actual destination before adding that record. Check lists occupied destinations and future replacements. The profile can prompt once for a leveling batch or automatically replace occupied managed slots when its overwrite option is enabled.
 
 ---
 

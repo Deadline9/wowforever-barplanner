@@ -1,13 +1,13 @@
 -- Run at the repository root with lua or texlua. Exercise the real Check/Apply entry point.
 local owners, registry, overrides, scope, writes, saves, rejected, output, clears, slotEdits
-local summary, full, details
+local summary, full, details, emptied
 local unpack = table.unpack or unpack
 local failures, passed = 0, 0
 local function test(name, fn)
     owners = { R = "RUN", NUMLOCK = "RUN", B = "PACK", ["SHIFT-B"] = "ALLBAGS", F13 = "ADDON" }
     registry = { "RUN", "PACK", "BUTTON", "ALLBAGS", "ADDON", "UNBOUND" }
     overrides, scope, writes, saves, rejected, output, clears, slotEdits = {}, 2, {}, 0, nil, {}, 0, 0
-    BarsmithDB, summary, full, details = {}, {}, {}, {}
+    BarsmithDB, summary, full, details, emptied = {}, {}, {}, {}, {}
     local ok, err = pcall(fn)
     if ok then passed = passed + 1 else failures = failures + 1; print(name, err) end
 end
@@ -36,13 +36,20 @@ GetNumMacros = function() return 0, 0 end
 UnitClass = function() return "Mage", "MAGE" end
 InCombatLockdown = function() return false end
 ClearCursor = function() clears = clears + 1 end
-GetActionInfo = function() return "spell", 100 end
-HasAction = function() return true end
-PickupAction = function() slotEdits = slotEdits + 1 end
-SlashCmdList = {}
+GetActionInfo = function(slot) if not emptied[slot] then return "spell", 100 end end
+HasAction = function(slot) return not emptied[slot] end
+PickupAction = function(slot) emptied[slot] = true; slotEdits = slotEdits + 1 end
+UnitGUID = function() return "Player-1" end
+UnitName = function() return "Tester" end
+GetRealmName = function() return "Realm" end
+IsPlayerSpell = function(id) return id == 100 end
+SlashCmdList, StaticPopupDialogs = {}, {}
+StaticPopup_StandardEditBoxOnEscapePressed = function(input) input:GetParent():Hide() end
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, line) output[#output+1] = line end }
 
 dofile("addon/Barsmith/Bindings.lua")
+dofile("addon/Barsmith/Profiles.lua")
+dofile("addon/Barsmith/Changes.lua")
 dofile("addon/Barsmith/Barsmith.lua")
 local BP = Barsmith
 local function run(records, version)
@@ -65,7 +72,7 @@ end)
 test("2 orphan warns before intentional changes", function()
     run("SLOT\t1\tclear\t\nENSURE\tB\tBUTTON")()
     says("Warning: PACK will be unbound: B to BUTTON.")
-    assert(owners.B == "BUTTON" and #writes == 1 and slotEdits == 1 and BarsmithDB.last)
+    assert(owners.B == "BUTTON" and #writes == 1 and slotEdits == 1 and BP.profiles.active().text)
 end)
 test("3 safe displacement", function()
     owners["CTRL-B"] = "PACK"
@@ -123,13 +130,13 @@ test("changed account scope", function()
     local apply = run("ENSURE\tX\tPACK")
     scope = 1
     apply()
-    assert(#writes == 0 and not BarsmithDB.last)
+    assert(#writes == 0 and not BP.profiles.active().text)
 end)
 test("stale census", function()
     local apply = run("ENSURE\tX\tPACK")
     owners.X = "ADDON"
     apply()
-    assert(#writes == 0 and not BarsmithDB.last)
+    assert(#writes == 0 and not BP.profiles.active().text)
 end)
 test("failed write rolls back before slots", function()
     rejected = "Y"
@@ -165,7 +172,7 @@ test("mixed versions rejected", function()
 end)
 test("slot dry run reports skipped stale and cleared actions", function()
     run("SLOT\t4\tspell\tFuture Spell\nSLOT\t5\tclear\t")
-    says("spell 100 -> keep current (skipped Future Spell)")
+    says("spell 100 -> Future Spell (future replacement; keep current: not learned yet)")
     says("spell 100 -> empty")
     local _, mentions = table.concat(details):gsub("Future Spell", "")
     assert(mentions == 1)
@@ -271,7 +278,7 @@ test("Details keeps changes and safety issues in a mixed report", function()
         .. "SLOT\t4\tspell\tFuture Spell\nSLOT\t5\tclear\t\nSLOT\t6\tspell\tspell:100")
     local changes = table.concat(details, "\n")
     for _, msg in ipairs({"Displacement: B", "PACK will be unbound", "Runtime override on F2",
-        "New binding: F2", "Explicit removal: R", "RUN remains on", "skipped Future Spell", "[5]: spell 100 -> empty"}) do
+        "New binding: F2", "Explicit removal: R", "RUN remains on", "Future Spell (future replacement", "[5]: spell 100 -> empty"}) do
         assert(changes:find(msg, 1, true), changes)
         assert(table.concat(full, "\n"):find(msg, 1, true))
     end
@@ -286,7 +293,7 @@ test("changing a runtime override after Check invalidates Apply", function()
     says("Run Check again.")
     apply()
     says("Run Check before Apply.")
-    assert(#writes == 0 and not BarsmithDB.last)
+    assert(#writes == 0 and not BP.profiles.active().text)
 end)
 for version = 1, 2 do
     test("BP" .. version .. " places learned names missing from the book and keeps explicit ranks", function()
@@ -336,7 +343,7 @@ for version = 1, 2 do
         says("4 slot changes, 3 skipped")
         assert(#pickups == 4 and slots[1] == 701 and slots[2] == 702 and slots[3] == 702 and slots[4] == 703)
         assert(not slots[5] and not slots[6] and not slots[7])
-        assert(BP.parse(BarsmithDB.last).slots[1].value == "Find Herbs")
+        assert(BP.parse(BP.profiles.active().text).slots[1].value == "Find Herbs")
     end)
 end
 test("setup export round-trips exact slot IDs", function()
@@ -375,37 +382,50 @@ test("setup export round-trips exact slot IDs", function()
     assert(#changes == 1 and changes[1] == "No changes or warnings.")
     local lines = table.concat(report, "\n")
     assert(lines:find("0 to fill, 0 to clear, 8 already right", 1, true), lines)
-    assert(lines:find("0 to change, 8 already right", 1, true), lines)
-    assert(lines:find("[1]: spell 301 -> already correct", 1, true))
-    assert(lines:find("[109, compatibility copy]: spell 301 -> already correct", 1, true))
+    assert(not lines:find("compatibility copy", 1, true), lines)
+    assert(lines:find("[1]: Feral Charge (Cat) (spell 301) -> already correct", 1, true))
+    assert(not lines:find("[109", 1, true))
     assert(not lines:find("skipped") and #output == 1)
     BP.run(text, false)
-    assert(BarsmithDB.last == text and slotEdits == 0)
+    assert(BP.profiles.active().text == text and slotEdits == 0)
 
     -- The very same unknown ID must still skip on a different slot.
     local _, other = BP.run(BP.serialize({ slots = {{slot = 12, kind = "spell", value = "spell:302"}} }), true)
     assert(table.concat(other):find("skipped spell:302", 1, true))
     GetActionInfo, HasAction, UnitClass = getAction, hasAction, getClass
-    UnitName, C_Item, C_Spell, IsPlayerSpell = nil, nil, nil, nil
+    C_Item, C_Spell = nil, nil
+    IsPlayerSpell = function(id) return id == 100 end
     GetNumSpellTabs, GetSpellTabInfo, GetSpellBookItemName, GetSpellBookItemInfo = nil, nil, nil, nil
 end)
 test("real frame gates Apply, switches reports, and invalidates edits immediately", function()
-    local buttons, window = {}
+    local buttons, labels, window, selector = {}, {}
     local noop = function() end
     local methods = {}
-    local function widget(kind, name)
+    local function widget(kind, name, parent, template)
         local w = setmetatable({ kind = kind, scripts = {}, enabled = true, text = "" },
             { __index = function(_, k) return methods[k] or noop end })
         if name == "BarsmithFrame" then window = w end
+        assert(kind ~= "EditBox" or parent ~= window, "Unexpected permanent name field")
+        if kind == "DropdownButton" then
+            assert(template == "WowStyle1DropdownTemplate")
+            selector, w.Text = w, widget("FontString")
+        end
         return w
     end
-    methods.CreateFontString, methods.CreateTexture = widget, widget
+    function methods:CreateFontString() return widget("FontString") end
+    methods.CreateTexture = widget
+    function methods:SetupMenu(build) self.build = build end
+    function methods:OverrideText(value) self.Text:SetText(value) end
     function methods:SetText(value)
         self.text = value
         if self.kind == "Button" then buttons[value] = self end
+        if self.kind == "FontString" then labels[value] = self end
         if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, false) end
     end
     function methods:GetText() return self.text end
+    function methods:HookScript(event, handler) self.scripts[event] = handler end
+    function methods:SetSize(width, height) self.width, self.height = width, height end
+    function methods:SetPoint(point, x, y) self.anchor, self.x, self.y = point, x, y end
     function methods:SetScript(event, handler) self.scripts[event] = handler end
     function methods:Show() self.visible = true end
     function methods:Hide() self.visible = false end
@@ -419,6 +439,26 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
         assert(button.enabled and button.visible ~= false, label)
         button.scripts.OnClick(button)
     end
+    assert(selector and not buttons["Select profile"] and labels[UnitName("player")] and labels["Profile:"])
+    assert(selector.Text:GetText() == "Default" and selector.width >= 300)
+    -- Check the actual anchored control bounds at the fixed frame size.
+    for _, labels in ipairs({
+        { "Check", "Apply", "Export setup", "Last applied plan", "Census", "Clear" },
+        { "Save new", "Rename", "Duplicate", "Delete", "Managed bars..." },
+        { "Review pending updates", "Revert last Apply", "Confirm", "Cancel" },
+    }) do
+        local right = 0
+        for _, label in ipairs(labels) do
+            local b = assert(buttons[label])
+            assert(b.anchor == "BOTTOMLEFT" and b.x >= right and b.x + b.width <= window.width - 10, label)
+            right = b.x + b.width + 4
+        end
+    end
+    local legacy, managed = buttons["Import old plan"], buttons["Managed bars..."]
+    assert(legacy.y + legacy.height < managed.y and legacy.x + legacy.width <= window.width - 10)
+    for _, label in ipairs({ "Import old plan", "Census", "Revert last Apply", "Review pending updates" }) do
+        assert(buttons[label].scripts.OnEnter and buttons[label].scripts.OnLeave)
+    end
     -- An accepted line break makes the stored text distinct from a reserialized plan.
     local slotsOnly = "BP2:\n" .. BP.b64encode("BARPLAN\t2\nSLOT\t1\tclear\t")
     window.edit:SetText(slotsOnly)
@@ -430,7 +470,7 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     local draftReport = window.status.text
     click("Last applied plan")
     assert(window.hint.text == "No plan applied yet." and window.edit.text == slotsOnly)
-    assert(buttons.Apply.enabled and window.status.text == draftReport and BarsmithDB.last == nil)
+    assert(buttons.Apply.enabled and window.status.text == draftReport and BP.profiles.active().lastApplied == nil)
     window.edit:SetText(slotsOnly .. " ")
     window.edit:SetText(slotsOnly)
     assert(not buttons.Apply.enabled)
@@ -478,13 +518,14 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
 
     -- Recover the successful Apply, even after a later Apply was rejected.
     local cursorClears = clears
+    local originalUnitName = UnitName
     UnitName = function() return "Tester" end
     click("Export setup")
     assert(BP.parse(window.edit.text).name == "Tester (from game)")
     click("Census")
     assert(window.edit.text:sub(1, 4) == "BC1:")
     click("Last applied plan")
-    assert(BarsmithDB.last == slotsOnly and window.edit.text == slotsOnly and window.edit.selected == slotsOnly)
+    assert(BP.profiles.active().lastApplied == slotsOnly and window.edit.text == slotsOnly and window.edit.selected == slotsOnly)
     assert(not buttons.Apply.enabled)
     SlashCmdList.BARSMITH("apply")
     assert(window.edit.text == slotsOnly and buttons.Apply.enabled and window.status.text:find("Check OK", 1, true))
@@ -493,7 +534,159 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     BP.run(slotsOnly, false)
     assert(window.status.text:find("Run Check before Apply.", 1, true))
     assert(slotEdits == 1 and clears == cursorClears and #writes == 0 and saves == 0)
-    UnitName = nil
+    UnitName = originalUnitName
+    -- Use the actual window controls to save a draft, apply, preview/cancel
+    -- Revert, confirm it, and delete the profile.
+    local plan = BP.serialize({ binds = {{ key = "B", command = "BUTTON" }} })
+    window.edit:SetText(plan)
+    local popup, input, action
+    StaticPopup_Show = function(key, prompt, _, data)
+        local def = assert(StaticPopupDialogs[key])
+        popup, input, action = widget("Frame"), widget("EditBox"), widget("PopupButton")
+        popup.prompt, popup.data, popup.definition = prompt, data, def
+        function popup:GetButton1() return action end
+        function popup:GetEditBox() return input end
+        function popup:SetFormattedText(fmt, ...) self.prompt = fmt:format(...) end
+        function input:GetParent() return popup end
+        popup:Show()
+        def.OnShow(popup, data)
+        return popup
+    end
+    StaticPopup_OnClick = function(dialog, index)
+        assert(dialog == popup and popup.visible)
+        if index == 2 or not popup.definition.OnAccept(popup, popup.data) then popup:Hide() end
+    end
+    local function prompt(label, title, accept, expected)
+        click(label)
+        assert(popup.visible and popup.prompt == title and action:GetText() == accept)
+        assert(input:GetText() == expected and input.selected == expected)
+    end
+    local function enter()
+        popup.definition.EditBoxOnEnterPressed(input)
+    end
+    window.edit:SetText(BP.serialize({ name = "Seren (from game)", slots = {} }))
+    prompt("Save new", "New profile name:", "Save", "")
+    popup.definition.EditBoxOnEscapePressed(input)
+    assert(not popup.visible and selector.Text:GetText() == "Default")
+    window.edit:SetText(plan)
+    prompt("Save new", "New profile name:", "Save", "")
+    input:SetText("Healing")
+    enter()
+    assert(not popup.visible and selector.Text:GetText() == "Healing")
+    local profile, character = BP.profiles.active()
+    assert(character.active == "Healing" and profile.text == plan and owners.B == "ADDON")
+    click("Check"); click("Apply")
+    assert(owners.B == "BUTTON" and profile.undo)
+    click("Revert last Apply"); click("Details")
+    assert(window.status.text:find("ADDON") and owners.B == "BUTTON")
+    click("Cancel")
+    assert(profile.undo and owners.B == "BUTTON")
+    click("Revert last Apply"); click("Confirm revert")
+    assert(owners.B == "ADDON" and not profile.undo)
+    click("Delete"); click("Delete profile")
+    assert(character.active == "Default" and not character.profiles.Healing)
+
+    local root
+    local function menuNode(label)
+        local node = { label = label, children = {} }
+        function node:CreateButton(text, click)
+            local child = menuNode(text)
+            self.children[text], child.click = child, click
+            return child
+        end
+        function node:CreateRadio(text, selected, click)
+            local child = self:CreateButton(text, click)
+            child.selected = selected
+        end
+        node.CreateCheckbox = node.CreateRadio
+        function node:CreateTitle(text) self.title = text end
+        function node:SetScrollMode(limit) self.limit = limit end
+        node.CreateDivider = noop
+        return node
+    end
+    MenuUtil = { CreateContextMenu = function(owner, build)
+        root = menuNode()
+        build(owner, root)
+    end }
+    local function openSelector()
+        root = menuNode()
+        selector.build(selector, root)
+    end
+    GetUnitName = function() return "Seren Grey" end
+    GetRealmName = function() return "" end
+    local imported = BP.serialize({name = "Leveling", slots = {}})
+    assert(buttons["Import old plan"].visible == false)
+    BarsmithDB.last = imported
+    BP.profiles.init()
+    openSelector()
+    assert(root.title == "Seren Grey" and root.limit and root.children.Default.selected())
+    window.edit:SetText(imported)
+    prompt("Save new", "New profile name:", "Save", "Leveling")
+    assert(character.active == "Default")
+    StaticPopup_OnClick(popup, 1)
+    assert(labels["Seren Grey"] and selector.Text:GetText() == "Leveling")
+    assert(character.active == "Leveling" and buttons["Import old plan"].visible)
+    prompt("Rename", "Rename profile:", "Rename", "Leveling")
+    input:SetText("Default")
+    enter()
+    assert(popup.visible and popup.prompt:find("already in use") and character.active == "Leveling")
+    input:SetText("Seren Grey Leveling")
+    enter()
+    local original = BP.profiles.active()
+    assert(selector.Text:GetText() == "Seren Grey Leveling" and not character.profiles.Leveling)
+    prompt("Duplicate", "Duplicate profile as:", "Duplicate", "Seren Grey Leveling Copy")
+    StaticPopup_OnClick(popup, 2)
+    assert(BP.profiles.active() == original and not character.profiles["Seren Grey Leveling Copy"])
+    prompt("Duplicate", "Duplicate profile as:", "Duplicate", "Seren Grey Leveling Copy")
+    enter()
+    assert(BP.profiles.active() ~= original and selector.Text:GetText() == "Seren Grey Leveling Copy")
+    local longName = string.rep("界", 21) .. "X"
+    prompt("Rename", "Rename profile:", "Rename", "Seren Grey Leveling Copy")
+    input:SetText(longName)
+    enter()
+    assert(selector.Text:GetText() == longName)
+    local copyName = string.rep("界", 19) .. " Copy"
+    prompt("Duplicate", "Duplicate profile as:", "Duplicate", copyName)
+    enter()
+    openSelector()
+    root.children[longName].click()
+    prompt("Duplicate", "Duplicate profile as:", "Duplicate", string.rep("界", 19) .. " Copy 2")
+    popup.definition.EditBoxOnEscapePressed(input)
+    assert(not popup.visible and character.active == longName)
+    openSelector()
+    assert(root.children[longName].selected() and not root.children.Default.selected())
+    root.children.Default.click()
+    assert(character.active == "Default" and selector.Text:GetText() == "Default")
+    prompt("Rename", "Rename profile:", "Rename", "Default")
+    openSelector()
+    root.children[longName].click()
+    input:SetText("Stale rename")
+    enter()
+    assert(not popup.visible and character.active == longName and not character.profiles["Stale rename"])
+    openSelector()
+    root.children.Default.click()
+    click("Import old plan")
+    assert(window.edit:GetText() == imported and BarsmithDB.legacyPlan == imported and not buttons.Apply.enabled)
+    click("Check"); click("Apply")
+    assert(not BarsmithDB.legacyPlan and not buttons["Import old plan"].visible)
+
+    -- Long profile lists remain selectable by name. A foreign row can only copy.
+    for i = 1, 80 do character.profiles["Layout " .. i] = {} end
+    BarsmithDB.characters.alt = { name = "Seren Grey", realm = "Other Realm",
+        profiles = { Holy = { text = plan, overwrite = true } }, active = "Holy" }
+    openSelector()
+    assert(root.children.Default.selected() and root.children["Layout 80"] and root.limit <= 360)
+    local group = root.children["Other characters"].children["Seren Grey - Other Realm"]
+    assert(group.title == "Copy to Seren Grey" and group.limit)
+    group.children.Holy.click()
+    assert(character.active == "Holy" and BP.profiles.active() ~= BarsmithDB.characters.alt.profiles.Holy)
+    assert(not BP.profiles.active().pending and not buttons.Apply.enabled)
+    click("Check")
+    click("Managed bars...")
+    local bar = root.children["Bar 2 (61–72)"]
+    assert(bar.selected())
+    bar.click()
+    assert(not bar.selected() and not buttons.Apply.enabled and window.edit:GetText() == plan)
 end)
 print(passed .. " passed, " .. failures .. " failed")
 assert(failures == 0)
