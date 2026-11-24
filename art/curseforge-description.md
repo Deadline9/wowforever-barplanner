@@ -1,10 +1,10 @@
-The in-game half of **[Barsmith](https://rubensayshi.github.io/wowforever-barplanner/)**, a free web page for planning your WoW Forever action bars, macros + keybinds. You set it all up on the page, copy 1 string, paste it into `/barsmith` and the addon does the dragging and binding for you.
+The in-game half of **[Barsmith](https://deadline9.github.io/wowforever-barplanner/)**, a free web page for planning your WoW Forever action bars, macros + keybinds. You set it all up on the page, copy 1 string, paste it into `/barsmith` and the addon does the dragging and binding for you.
 
 I think it's most useful for alts (or after a fresh install) where setting up 8 bars and a pile of keybinds by hand is a bit of a chore. If your bars are already sorted this probably isn't for you.
 
 ## How it works
 
-1. Open **[the Barsmith page](https://rubensayshi.github.io/wowforever-barplanner/)**, pick your class + race and drag spells from the Forever spellbook onto your bars. Write your macros, then use keybind mode to bind keys like you would in game (hover a button, press a key)
+1. Open **[the Barsmith page](https://deadline9.github.io/wowforever-barplanner/)**, pick your class + race and drag spells from the Forever spellbook onto your bars. Write your macros, then use keybind mode to bind keys like you would in game (hover a button, press a key)
 2. Copy the plan string at the bottom of the page
 3. In game, out of combat: `/barsmith`, paste, **Check** to see what it'll change, then **Apply**
 
@@ -21,7 +21,7 @@ Apply creates or updates the plan's macros, puts spells, macros + items on their
 ## Commands
 
 - `/barsmith` opens the window (paste, Check, Apply, Export setup)
-- `/barsmith apply` runs the last applied plan again
+- `/barsmith apply` opens the last applied plan and runs Check
 - `/barsmith auto` turns auto-fill for newly learned spells on or off
 - `/barsmith export` opens the window with your current BP2 setup
 
@@ -37,4 +37,5 @@ If something comes out wrong, a comment with your class, your plan string and wh
 
 - The idea comes from [Naowh's Forever action bar planner](https://naowh.gg/forever/action-bars), which only sets up bars for Naowh's own addon suite
 - Spells, talents and racials from [wowforevertalents.com](https://wowforevertalents.com/), tooltips from Wowhead's Forever database
-- Source: [github.com/rubensayshi/wowforever-barplanner](https://github.com/rubensayshi/wowforever-barplanner)
+- [Fork source and installation instructions](https://github.com/Deadline9/wowforever-barplanner/tree/main)
+- Original Barsmith by [Ruben (rubensayshi)](https://github.com/rubensayshi/wowforever-barplanner)
