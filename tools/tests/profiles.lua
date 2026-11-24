@@ -656,5 +656,55 @@ test("Revert cannot delete a macro still on a newly excluded slot", function()
     assert(idAt(61) == "Keep" and w.macros.Keep and w.keys.B == "BUTTON" and P.active().undo)
 end)
 
+test("dynamic tooltip icon is accepted and recorded for Revert", function()
+    local original = CreateMacro
+    CreateMacro = function(n, icon, body, perChar)
+        return original(n, icon == 134400 and 132140 or icon, body, perChar)
+    end
+    local text = plan("MACRO\tClaw\t134400\t1\t#showtooltip Claw\\n/startattack [harm,nodead]\\n/cast Claw\nSLOT\t1\tmacro\tClaw")
+    local ok, err = pcall(function()
+        apply(text)
+        assert(w.macros.Claw.icon == 132140 and idAt(1) == "Claw")
+        assert(P.active().undo.ops[1].after.icon == 132140)
+        reload()
+        revert()
+        assert(not w.macros.Claw and not idAt(1))
+    end)
+    CreateMacro = original
+    assert(ok, err)
+end)
+
+test("resolved tooltip macro rolls back after a later slot rejection", function()
+    local original = CreateMacro
+    CreateMacro = function(n, icon, body, perChar)
+        return original(n, icon == 134400 and 132140 or icon, body, perChar)
+    end
+    local ok, err = pcall(function()
+        spell(1, 1); spell(2, 1)
+        local text = plan("MACRO\tClaw\t134400\t1\t#showtooltip Claw\\n/cast Claw\nSLOT\t1\tmacro\tClaw\nSLOT\t2\tspell\tWrath\nENSURE\tB\tBUTTON")
+        has(BP.run(text, true), "Check OK")
+        w.rejectSlot = 2
+        has(BP.run(text, false), "Previous state restored")
+        assert(not w.macros.Claw and idAt(1) == 1 and idAt(2) == 1 and w.keys.B == "PACK")
+    end)
+    CreateMacro = original
+    assert(ok, err)
+end)
+
+test("unexpected fixed icon is still rejected", function()
+    local original = CreateMacro
+    CreateMacro = function(n, icon, body, perChar)
+        return original(n, 132140, body, perChar)
+    end
+    local ok, err = pcall(function()
+        local text = plan("MACRO\tClaw\t42\t1\t#showtooltip Claw\\n/cast Claw")
+        has(BP.run(text, true), "Check OK")
+        has(BP.run(text, false), "Game did not restore/place Claw")
+        assert(not P.active().text)
+    end)
+    CreateMacro = original
+    assert(ok, err)
+end)
+
 print(passed .. " passed, " .. failed .. " failed")
 assert(failed == 0)
