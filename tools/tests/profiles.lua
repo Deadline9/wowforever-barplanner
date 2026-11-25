@@ -1358,7 +1358,7 @@ test("a base-only cursor for an explicit variant requires exclusive physical mem
     end)
 end)
 
-test("a qualified temporary override becomes eligible only when independently learned", function()
+test("a qualified override without a verified base waits until independently learned", function()
     local visible, known, picks = true, false, 0
     withAPI({
         C_Spell = { GetSpellIDForSpellIdentifier = function() return 71 end,
@@ -1554,6 +1554,147 @@ test("oscillating target IDs each fail once and a confirmed relearn can retry th
         w.event("LEARNED_SPELL_IN_SKILL_LINE", 81); event("BAG_UPDATE_DELAYED")
         w.event("LEARNED_SPELL_IN_SKILL_LINE", 81); event()
         assert(calls == 3 and not idAt(81) and P.active().pending[81])
+    end)
+end)
+
+test("two named forms place one learned base, survive a stance change, and export the physical ID", function()
+    local idsByName = { ["Rush (Guard)"] = 201, ["Rush (Assault)"] = 202 }
+    local names = { [200] = "Rush", [201] = "Rush (Guard)", [202] = "Rush (Assault)" }
+    local form, action = 201, GetActionInfo
+    char().known[200] = true
+    withAPI({
+        C_Spell = { GetSpellIDForSpellIdentifier = function(name) return idsByName[name] end,
+            GetSpellName = function(id) return names[id] end,
+            GetBaseSpell = function(id) return (id == 201 or id == 202) and 200 or id end },
+        C_SpellBook = { FindBaseSpellByID = function(id) return id end },
+        GetActionInfo = function(slot)
+            local kind, id = action(slot)
+            if id == 200 then return kind, form end
+            return kind, id
+        end,
+        C_ActionBar = { FindSpellActionButtons = spellButtons },
+    }, function()
+        local text = plan("SLOT\t81\tspell\tRush (Guard)\nSLOT\t105\tspell\tRush (Assault)\nSLOT\t2\tspell\tspell:201")
+        has(BP.run(text, true), "Check OK")
+        form = 202
+        has(BP.run(text, false), "Done:")
+        assert(idAt(81) == 200 and idAt(105) == 200 and not idAt(2) and P.active().pending[2])
+        local snapshot = BP.exportCurrent()
+        local exported = BP.parse(snapshot)
+        assert(#exported.slots == 2)
+        for _, slot in ipairs(exported.slots) do assert(slot.value == "spell:200") end
+        form = 201
+        revert()
+        apply(snapshot)
+        assert(idAt(81) == 200 and idAt(105) == 200)
+    end)
+end)
+
+test("displayed book name and subtext resolve without a global name lookup; ambiguous owners stay pending", function()
+    local count, separate = 1, false
+    withAPI({
+        Enum = { SpellBookSpellBank = { Player = 0 }, SpellBookItemType = { Spell = 1 } },
+        C_Spell = { GetSpellName = function(id) return "Ability " .. id end },
+        C_ActionBar = { FindSpellActionButtons = spellButtons },
+        C_SpellBook = { GetNumSpellBookSkillLines = function() return 1 end,
+            GetSpellBookSkillLineInfo = function() return { numSpellBookItems = count } end,
+            GetSpellBookItemInfo = function(i)
+                if separate and i == 2 then return { itemType = 1, name = "Leap", subName = "Hidden", spellID = 321, actionID = 321 } end
+                return { itemType = 1, name = "Leap", subName = "Hidden", spellID = 321, actionID = 300 + i }
+            end,
+            PickupSpellBookItem = function(i) w.cursor = { "spell", separate and i == 2 and 321 or 300 + i } end },
+    }, function()
+        local text = plan("SLOT\t1\tspell\tLeap (Hidden)")
+        count = 2
+        spell(1, 1)
+        local _, _, details = BP.run(text, true)
+        has(details, "multiple learned actions")
+        has(BP.run(text, false), "Done:")
+        assert(idAt(1) == 1 and P.active().pending[1])
+        count = 1
+        BP.levelUpdates("review"); BP.levelUpdates("confirm")
+        assert(idAt(1) == 301)
+        separate, count = true, 2
+        apply(text)
+        assert(idAt(1) == 321)
+    end)
+end)
+
+test("forward mapping verifies an out-of-book base and never trusts a stripped qualifier", function()
+    char().known[410] = true
+    local child = 411
+    withAPI({
+        C_Spell = { GetSpellIDForSpellIdentifier = function(name)
+                if name == "Ward" then return 410 end
+                return 411 -- client ignores even a misspelled qualifier
+            end,
+            GetSpellName = function(id) return id == 410 and "Ward" or "Ward (Spirit)" end,
+            GetOverrideSpell = function(id) return id == 410 and child or id end },
+    }, function()
+        local text = plan("SLOT\t1\tspell\tWard (Spirit)\nSLOT\t2\tspell\tWard (Specter)")
+        has(BP.run(text, true), "Check OK")
+        child = 499
+        local _, _, details = BP.run(text, false)
+        has(details, "intended")
+        assert(not idAt(1))
+        child = 411
+        local _, _, checked = BP.run(text, true)
+        has(checked, "cannot verify a learned action for this spell name and qualifier")
+        has(BP.run(text, false), "Done:")
+        assert(idAt(1) == 410 and not idAt(2))
+    end)
+end)
+
+test("an alias cannot grant an unavailable or passive base or substitute another spell rank", function()
+    local passive = false
+    withAPI({
+        C_Spell = { GetSpellIDForSpellIdentifier = function(name)
+                if name == "Wave (Rank 1)" or name == "Wave (Rang 1)" then return 453 end
+                return 451
+            end,
+            GetSpellName = function(id) return id == 451 and "Wave (Tide)" or "Wave" end,
+            GetSpellSubtext = function(id) return id == 453 and "Rank 1" or id == 450 and "Rank 2" end,
+            GetBaseSpell = function() return 450 end,
+            IsSpellPassive = function(id) return passive and id == 450 end },
+    }, function()
+        local text = plan("SLOT\t1\tspell\tWave (Tide)\nSLOT\t2\tspell\tWave (Rank 1)\nSLOT\t3\tspell\tWave (Rang 1)")
+        apply(text)
+        assert(not idAt(1) and not idAt(2))
+        char().known[450], passive = true, true
+        event()
+        assert(not idAt(1) and not idAt(2))
+        passive = false
+        event()
+        assert(idAt(1) == 450 and not idAt(2) and not idAt(3))
+        has(BP.run(text, true), "Check OK")
+    end)
+end)
+
+test("a forward-only legacy book relationship exports the same action after the displayed spell changes", function()
+    local active, raw = 701, GetActionInfo
+    char().known[700] = true
+    withAPI({
+        GetNumSpellTabs = function() return 1 end,
+        GetSpellTabInfo = function() return nil, nil, 0, 1 end,
+        GetSpellBookItemName = function() return "Step", "", 700 end,
+        GetSpellBookItemInfo = function() return "SPELL", 700 end,
+        C_Spell = { GetSpellName = function(id) return id == 700 and "Step" or "Shadow Step" end,
+            GetSpellIDForSpellIdentifier = function(name) if name == "Shadow Step" then return 701 end end,
+            GetOverrideSpell = function(id) return id == 700 and active or id end },
+        GetActionInfo = function(slot)
+            local kind, id = raw(slot)
+            if id == 700 then return kind, active end
+            return kind, id
+        end,
+        C_ActionBar = { FindSpellActionButtons = spellButtons },
+    }, function()
+        apply(plan("SLOT\t1\tspell\tShadow Step"))
+        local exported = BP.exportCurrent()
+        assert(idAt(1) == 700 and BP.parse(exported).slots[1].value == "spell:700")
+        active = 702
+        revert()
+        apply(exported)
+        assert(idAt(1) == 700)
     end)
 end)
 
