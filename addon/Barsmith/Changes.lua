@@ -12,6 +12,53 @@ function C.equal(a, b)
     return true
 end
 
+-- Compare saved, scalar configuration fields. Use physical slot IDs and
+-- macro names as record keys so insertions never shift the rest of a report.
+local function visible(v)
+    if v == nil then return "(absent)" end
+    if type(v) == "string" then
+        if v:match("^%s*BP[12]:") then
+            local plan = Barsmith.parse(v)
+            return ("%s (%d bytes)"):format(plan and plan.name ~= "" and plan.name or "saved plan", #v)
+        end
+        return ("%q"):format(v)
+    end
+    return tostring(v)
+end
+
+function C.differences(lines, path, before, now)
+    if C.equal(before, now) then return end
+    if type(before) == "table" or type(now) == "table" then
+        if type(before) ~= "table" then before = {} end
+        if type(now) ~= "table" then now = {} end
+        local keys, ordered = {}, {}
+        for k in pairs(before) do keys[k] = true end
+        for k in pairs(now) do keys[k] = true end
+        for k in pairs(keys) do table.insert(ordered, k) end
+        table.sort(ordered, function(a,b) return tostring(a) < tostring(b) end)
+        if #ordered > 0 then
+            for _, k in ipairs(ordered) do
+                C.differences(lines, path .. " / " .. tostring(k), before[k], now[k])
+            end
+            return
+        end
+        -- Even a missing vs empty pending set changes Auto-fill eligibility.
+        table.insert(lines, path .. ": empty record added or removed")
+    else
+        local change = path .. ": " .. visible(before) .. " -> " .. visible(now)
+        if type(before) == "string" and type(now) == "string" and before:match("^%s*BP[12]:") then
+            local at = 1
+            while before:byte(at) == now:byte(at) do at = at + 1 end
+            change = change .. " (first difference at byte " .. at .. ")"
+        end
+        table.insert(lines, change)
+    end
+end
+
+function C.checkDifferences(lines, message)
+    if #lines > 0 then error({ message = message, details = lines }, 0) end
+end
+
 local function macroIndex(name)
     local account, character = GetNumMacros()
     local max = MAX_ACCOUNT_MACROS or 120
@@ -31,6 +78,9 @@ function C.macro(name)
     local i = macroIndex(name)
     if not i then return false end
     local n, icon, body = GetMacroInfo(i)
+    if C_Macro and C_Macro.GetSelectedMacroIcon then
+        icon = C_Macro.GetSelectedMacroIcon(i)
+    end
     assert(n and icon and body, "Incomplete macro: " .. name)
     return { name = n, icon = icon, body = body, perChar = i > (MAX_ACCOUNT_MACROS or 120) }
 end
@@ -47,7 +97,7 @@ function C.slotMacro(slot)
     return macro
 end
 
-function C.slot(slot)
+function C.slot(slot, book)
     local kind, id, subtype = GetActionInfo(slot)
     if not kind then
         assert(not HasAction(slot), "Unknown action on slot " .. slot)
@@ -57,11 +107,12 @@ function C.slot(slot)
         local macro = C.slotMacro(slot)
         return { kind = kind, name = macro.name, perChar = macro.perChar }
     end
+    if kind == "spell" then id = C.slotSpellID(slot, id, book) end
     return { kind = kind, id = id, subtype = subtype }
 end
 
-function C.read(op)
-    if op.slot then return C.slot(op.slot) end
+function C.read(op, book)
+    if op.slot then return C.slot(op.slot, book) end
     return C.macro(op.name)
 end
 
@@ -85,21 +136,47 @@ function C.bindingUndo(preview)
     return undo
 end
 
-function C.reverseBindings(u)
+function C.reverseBindings(u, protected)
     if not u then return end
+    protected = protected or {}
     local s = B.capture(u.plan.binds, u.rows)
-    assert(s.set == u.set, "Binding set changed. Select the original set in WoW.")
+    local plan, skipped, reasons = { version = 2, binds = {} }, {}, {}
+    local expected, needed = {}, {}
     for cmd, keys in pairs(u.rows) do
-        assert(C.equal(keys, s.rows[cmd].keys), "Binding relationships changed for " .. cmd)
+        for key in pairs(keys) do expected[key] = cmd end
     end
-    for key, expected in pairs(u.overrides) do
-        assert((s.overrides[key] or false) == expected, "Runtime override changed on " .. key)
-        -- Absence matters too: a formerly removed key may now have a new owner.
-        assert(not s.owners[key] or (u.rows[s.owners[key]] and u.rows[s.owners[key]][key]),
-            "Binding owner changed for " .. key)
+    for _, bind in ipairs(u.plan.binds) do
+        local key = bind.key
+        local page = protected[bind.command] or protected[expected[key]] or protected[s.owners[key]]
+        if page then
+            skipped[key] = true
+            table.insert(reasons, "Leave " .. key .. " untouched (excluded " .. page .. ", undo " .. bind.op .. " " .. bind.command .. ").")
+        else
+            table.insert(plan.binds, bind)
+            needed[bind.command] = true
+            if expected[key] then needed[expected[key]] = true end
+        end
     end
-    local preview = B.preview(u.plan, s)
+    local lines = {}
+    if #plan.binds > 0 then
+        C.differences(lines, "Binding set", u.set, s.set)
+        for cmd in pairs(needed) do
+            local live, saved = {}, {}
+            for key in pairs(s.rows[cmd].keys) do if not skipped[key] then live[key] = true end end
+            for key in pairs(u.rows[cmd]) do if not skipped[key] then saved[key] = true end end
+            C.differences(lines, "Keys on " .. cmd, saved, live)
+        end
+        for key, override in pairs(u.overrides) do
+            if not skipped[key] and (needed[expected[key]] or not expected[key]) then
+                C.differences(lines, "Override on " .. key, override, s.overrides[key] or false)
+                C.differences(lines, "Owner of " .. key, expected[key], s.owners[key])
+            end
+        end
+    end
+    C.checkDifferences(lines, "Binding relationships changed.")
+    local preview = B.preview(plan, s, protected)
     assert(#preview.errors == 0, preview.errors[1])
+    preview.plan, preview.excluded = plan, reasons
     return preview
 end
 
@@ -107,17 +184,18 @@ local function putMacro(name, value)
     local idx = macroIndex(name)
     if not value then
         assert(idx, "Missing macro: " .. name)
-        DeleteMacro(idx)
+        return DeleteMacro(idx)
     elseif idx then
-        EditMacro(idx, value.name, value.icon, value.body)
+        return EditMacro(idx, value.name, value.icon, value.body)
     else
-        CreateMacro(value.name, value.icon, value.body, value.perChar)
+        return CreateMacro(value.name, value.icon, value.body, value.perChar)
     end
 end
 
-local function write(op, value, pickup)
+local function write(op, value, pickup, receipt, book)
     if not op.slot then
-        putMacro(op.name, value)
+        local index = putMacro(op.name, value)
+        if receipt and type(index) == "number" and index > 0 then receipt.index = index end
     elseif value.kind == "empty" then
         PickupAction(op.slot)
         ClearCursor()
@@ -126,24 +204,24 @@ local function write(op, value, pickup)
         assert(fn, "Action unavailable for slot " .. op.slot)
         fn()
         local kind, id, _, spellID = GetCursorInfo()
-        assert(kind == value.kind and (kind ~= "spell" or not spellID or spellID == value.id)
+        local spellOK = kind ~= "spell" or not spellID or spellID == value.id
+        if kind == value.kind and not spellOK and C_SpellBook and C_SpellBook.FindSpellOverrideByID then
+            spellOK = spellID == C_SpellBook.FindSpellOverrideByID(value.id)
+        end
+        assert(kind == value.kind and spellOK
             and (kind ~= "item" or id == value.id)
             and (kind ~= "macro" or GetMacroInfo(id) == value.name), "Pickup failed for slot " .. op.slot)
         PlaceAction(op.slot)
         ClearCursor()
     end
-    local actual = C.read(op)
-    -- CreateMacro can translate an icon path into its numeric file ID.
-    if not op.slot and value and actual and type(actual.icon) == "number" then
-        -- The client reports the resolved tooltip texture for question-mark macros.
-        -- Keep exact name, body and scope verification; save the observed texture
-        -- in the transaction record so rollback and Revert compare live state.
-        if type(value.icon) == "string" or (value.icon == 134400
-            and value.body:lower():match("^%s*#showtooltip[%s\r\n]")) then
-            if actual.name == value.name and actual.body == value.body and actual.perChar == value.perChar then
-                value.icon = actual.icon
-            end
-        end
+    local actual = C.read(op, book)
+    -- Legacy clients expose only the displayed texture. Accept the first
+    -- resolution of a requested automatic icon, then compare it strictly.
+    if not op.slot and value and actual and not (C_Macro and C_Macro.GetSelectedMacroIcon)
+        and value.icon == 134400 and type(actual.icon) == "number"
+        and (value.body:lower() .. "\n"):match("^%s*#showtooltip%s")
+        and value.name == actual.name and value.body == actual.body and value.perChar == actual.perChar then
+        value.icon = actual.icon
     end
     if op.slot and pickup and value.kind ~= "empty" and not value.subtype and actual.kind == value.kind then
         value.subtype = actual.subtype
@@ -154,20 +232,29 @@ end
 -- Both Apply and confirmed Revert enter here after a read-only preflight.
 -- Reverse completed operations if a later game call rejects the batch.
 function C.execute(ops, plan, preview, pickups)
+    local book = #ops > 0 and C_ActionBar and C_ActionBar.FindSpellActionButtons and C.spellbookEntries()
     local undo = C.bindingUndo(preview)
     if preview then
         local ok, err, after = B.commit(plan, preview)
-        assert(ok, err)
+        if not ok then error(err, 0) end
         if undo then
             for key in pairs(undo.overrides) do undo.overrides[key] = after.overrides[key] or false end
         end
     end
-    local attempted = 0
+    local attempted, failedWrite = 0, nil
     local ok, err = pcall(function()
         for i, op in ipairs(ops) do
-            assert(C.equal(C.read(op), op.before), "State changed for " .. (op.name or ("slot " .. op.slot)))
+            local actual = C.read(op, book)
+            local where = op.name or ("slot " .. op.slot)
+            if not C.equal(actual, op.before) then
+                local differences = {}
+                C.differences(differences, where, op.before, actual)
+                C.checkDifferences(differences, "State changed for " .. where .. ".")
+            end
             attempted = i
-            write(op, op.after, pickups and pickups[i])
+            failedWrite = {}
+            write(op, op.after, pickups and pickups[i], failedWrite, book)
+            failedWrite = nil
         end
     end)
     if ok then return undo end
@@ -176,10 +263,19 @@ function C.execute(ops, plan, preview, pickups)
     for i = attempted, 1, -1 do
         local op = ops[i]
         local restored = pcall(function()
-            local live = C.read(op)
+            local live = C.read(op, book)
+            if i == attempted and failedWrite and failedWrite.index and op.name and not live then
+                assert(not GetMacroInfo(failedWrite.index), "Unexpected macro name after write")
+            end
             if not C.equal(live, op.before) then
-                assert(C.equal(live, op.after))
-                write(op, op.before)
+                -- A synchronous macro write can change only part of the
+                -- record before failing verification. Recover this attempted
+                -- name in its verified scope; earlier operations stay strict.
+                local partialMacro = i == attempted and failedWrite and op.name and live and op.after
+                    and live.name == op.after.name and (live.perChar == op.after.perChar
+                        or (not op.before and failedWrite.index == macroIndex(live.name)))
+                assert(partialMacro or C.equal(live, op.after))
+                write(op, op.before, nil, nil, book)
             end
         end)
         recovered = restored and recovered
@@ -188,5 +284,10 @@ function C.execute(ops, plan, preview, pickups)
         local restored, result = pcall(function() return B.commit(undo.plan, C.reverseBindings(undo)) end)
         recovered = recovered and restored and result
     end
-    error(tostring(err) .. (recovered and ". Previous state restored." or ". Recovery incomplete; inspect bars, macros and keys."))
+    local recovery = recovered and " Previous state restored." or " Recovery incomplete; inspect bars, macros and keys."
+    if type(err) == "table" then
+        err.message = err.message .. recovery
+        error(err, 0)
+    end
+    error(tostring(err) .. "." .. recovery)
 end

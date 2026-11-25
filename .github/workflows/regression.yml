@@ -1,4 +1,4 @@
-name: Macro recovery regression tests
+name: Barsmith regression tests
 on:
   pull_request:
     branches: [main]
@@ -6,10 +6,11 @@ permissions:
   contents: read
 jobs:
   regression:
-    if: github.head_ref == 'macro-icon-recovery'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -23,4 +24,6 @@ jobs:
           lua tools/tests/bindings.lua
           lua tools/tests/profiles.lua
       - name: Run planner tests
-        run: NODE_PATH=/tmp/barsmith-test/node_modules node tools/tests/planner.cjs
+        run: |
+          git show 3163d36:index.html > /tmp/barsmith-upstream.html
+          NODE_PATH=/tmp/barsmith-test/node_modules node tools/tests/planner.cjs /tmp/barsmith-upstream.html

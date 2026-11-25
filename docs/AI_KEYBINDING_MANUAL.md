@@ -638,7 +638,7 @@ WoW keybinding guidance similarly recommends maintaining consistent functions ac
 
 Barsmith layouts can be character-specific, but WoW's underlying keybinding set may be **account-wide** or **character-specific**. The Binding Census records the active binding context, and Check/Apply operate on that active set. Never assume a binding change is isolated to the current character merely because the action-bar contents are character-specific.
 
-In the addon's profile manager, confirm the displayed character and active layout before Check. The profile’s Managed bars settings can exclude action slots independently of binding instructions. Selecting a profile loads its saved plan for review. Apply approves the reviewed batch in the current WoW binding set. A character may have separate leveling and healing profiles with different future-slot overwrite preferences.
+In the addon's profile manager, confirm the displayed character and active layout before Check. Read the profile’s Managed bars settings alongside the export and census. Each excluded independent bar protects its physical slots and every key on its standard button commands, including keys that an assignment elsewhere would displace. For example, Bar 2 occupies slots 61–72 and owns MULTIACTIONBAR1BUTTON1 through MULTIACTIONBAR1BUTTON12. Check’s Details identifies skipped instructions. Keep intentionally reserved keys out of the generated plan. Selecting a profile loads its saved plan for review. Apply approves the reviewed batch in the current WoW binding set. A character may have separate leveling and healing profiles with different future-slot overwrite preferences.
 
 For a player setting up multiple characters, prefer a layered model:
 
@@ -695,6 +695,8 @@ It is more useful if the key retains a related **purpose**, such as:
 Do not sacrifice a materially better state-specific layout merely to create superficial symmetry.
 
 Inspect the Export setup rather than guessing which slots/pages are actually used.
+
+Bar 1 controls the shared ACTIONBUTTON keys across humanoid, Cat, Bear and other paged bars. Excluding one form page protects its slots. A shared key change on an enabled Bar 1 is felt across forms. Keep exported exact spell IDs when the client distinguishes form-specific actions. A physical page number alone cannot tell you which variant was placed there.
 
 Only explicit `SLOT` records authorize placement on a form page. If a bar addon needs a copy on a different physical page, establish its actual destination before adding that record. Check lists occupied destinations and future replacements. The profile can prompt once for a leveling batch or automatically replace occupied managed slots when its overwrite option is enabled.
 
@@ -1243,7 +1245,7 @@ Do not transform the plan into an ID-first format.
 
 ## Macros
 
-Preserve existing macro text unless intentionally changing it.
+Preserve existing macro text unless intentionally changing it. An explicit macro edit affects every reference, including buttons on excluded bars. Read Check’s shared-use warnings before Apply. Preserve the selected question-mark icon (134400) for dynamic macros. Its displayed texture can change with form or target.
 
 Do not "clean up" macros merely because they look unusual.
 

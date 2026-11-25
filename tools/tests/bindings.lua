@@ -111,6 +111,53 @@ test("10 no-op", function()
     run("ENSURE\tB\tPACK\nENSURE\tF13\tADDON")()
     assert(#writes == 0 and saves == 0)
 end)
+for _, version in ipairs({ 1, 2 }) do
+    test("BP" .. version .. " protects independent bar rows and displaced secondaries", function()
+        local command = "MULTIACTIONBAR1BUTTON12"
+        owners["SHIFT-H"], owners["SHIFT-Z"] = command, command
+        local op = version == 1 and "BIND" or "ENSURE"
+        BP.profiles.setBarManaged(BP.profiles.active(), 61, false)
+        local records = op .. "\tB\t" .. command .. "\n" .. op .. "\tSHIFT-H\tRUN\n" .. op .. "\tF5\tBUTTON"
+        if version == 2 then records = records .. "\nREMOVE\tSHIFT-Z\t" .. command end
+        run(records, version)()
+        assert(owners.B == "PACK" and owners["SHIFT-H"] == command and owners["SHIFT-Z"] == command)
+        assert(owners.R == "RUN" and owners.NUMLOCK == "RUN" and owners.F5 == "BUTTON" and #writes == 1)
+        says("binding instructions to protect excluded bars")
+        assert(table.concat(details, "\n"):find("SHIFT-H -> RUN (excluded Bar 2", 1, true))
+    end)
+end
+
+test("BP1 keeps existing keys when part of an exact destination is excluded", function()
+    owners.X, owners.Y = "MULTIACTIONBAR1BUTTON2", "BUTTON"
+    BP.profiles.setBarManaged(BP.profiles.active(), 61, false)
+    run("BIND\tX\tRUN\nBIND\tF7\tRUN\nBIND\tY\tMULTIACTIONBAR1BUTTON2\nBIND\tF8\tBUTTON", 1)()
+    assert(owners.X == "MULTIACTIONBAR1BUTTON2" and not owners.F7 and owners.R == "RUN" and owners.NUMLOCK == "RUN")
+    assert(owners.Y == "BUTTON" and owners.F8 == "BUTTON" and #writes == 1)
+end)
+
+test("Bar 1 owns shared form keys independently of form-page slot exclusions", function()
+    BP.profiles.setBarManaged(BP.profiles.active(), 73, false)
+    run("ENSURE\tF7\tACTIONBUTTON4\nSLOT\t73\tclear\t")()
+    assert(owners.F7 == "ACTIONBUTTON4" and slotEdits == 0)
+    BP.profiles.setBarManaged(BP.profiles.active(), 1, false)
+    local text = BP.serialize({ binds = {{ key = "F7", command = "PACK" }, { key = "B", command = "ACTIONBUTTON4" }},
+        slots = {{slot = 97, kind = "clear"}} })
+    BP.run(text, true); BP.run(text, false)
+    assert(owners.B == "PACK" and owners.F7 == "ACTIONBUTTON4" and emptied[97] and #writes == 1)
+end)
+
+test("each independent binding prefix maps to the client's physical page", function()
+    local firsts = {61, 49, 25, 37, 145, 157, 169}
+    for bar, first in ipairs(firsts) do
+        local p = BP.profiles.active()
+        BP.profiles.setBarManaged(p, first, false)
+        local command = "MULTIACTIONBAR" .. bar .. "BUTTON12"
+        run("ENSURE\tX\t" .. command)()
+        assert(not owners.X and #writes == 0 and saves == 0)
+        BP.profiles.setBarManaged(p, first, true)
+    end
+end)
+
 test("conflicting intent", function()
     run("ENSURE\tctrl-shift-b\tPACK\nENSURE\tSHIFT-CTRL-B\tBUTTON")()
     says("competing instructions")

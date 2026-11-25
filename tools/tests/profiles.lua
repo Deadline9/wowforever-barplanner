@@ -596,7 +596,7 @@ test("foreign profile copies are independent local drafts, even for other classe
     assert(P.active() == source and source.pending[3] and source.undo)
 end)
 
-test("excluded Bar 2 slots skip Check and Apply while explicit binding changes still run", function()
+test("excluded Bar 2 slots and their explicit bindings are protected", function()
     spell(61, 1); spell(72, 1); spell(73, 1)
     w.keys.Z, w.keys.X = "MULTIACTIONBAR1BUTTON1", "MULTIACTIONBAR1BUTTON1"
     local p = P.active()
@@ -609,7 +609,7 @@ test("excluded Bar 2 slots skip Check and Apply while explicit binding changes s
     char().slots[61] = { "flyout", 23 } -- an unrelated edit after Check
     has(BP.run(text, false), "Done:")
     assert(idAt(60) == 5 and idAt(61) == 23 and idAt(72) == 1 and idAt(73) == 5)
-    assert(w.keys.B == w.keys.Z and w.keys.Z == w.keys.X and w.keys.Z == "MULTIACTIONBAR1BUTTON1")
+    assert(w.keys.B == "PACK" and w.keys.Z == w.keys.X and w.keys.Z == "MULTIACTIONBAR1BUTTON1")
     assert(P.manage("duplicate", "Resto"))
     P.setBarManaged(P.active(), 61, true)
     assert(not P.managesSlot(p, 61))
@@ -704,6 +704,293 @@ test("unexpected fixed icon is still rejected", function()
     end)
     CreateMacro = original
     assert(ok, err)
+end)
+
+test("Revert protects original, applied and newly acquired excluded binding owners", function()
+    local bar = "MULTIACTIONBAR1BUTTON1"
+    w.keys.Z, w.keys.X = bar, bar
+    apply(plan("ENSURE\tZ\tBUTTON\nENSURE\tB\t" .. bar .. "\nENSURE\tF5\tBUTTON\nENSURE\tF6\tPACK"))
+    P.setBarManaged(P.active(), 61, false)
+    w.keys.B, w.keys.F5 = "OTHER", bar
+    local summary = BP.revert(false)
+    has(summary, "Revert last Apply?")
+    has(BP.revert(true), "Reverted")
+    assert(w.keys.Z == "BUTTON" and w.keys.X == bar and w.keys.B == "OTHER" and w.keys.F5 == bar)
+    assert(not w.keys.F6 and w.keys.NUMLOCK == "RUN")
+end)
+
+test("protected Revert binding cannot authorize deletion of a directly bound macro", function()
+    local bar = "MULTIACTIONBAR1BUTTON1"
+    w.keys.X = bar
+    apply(plan("MACRO\tKeep\t42\t1\t/dance\nENSURE\tX\tMACRO Keep"))
+    P.setBarManaged(P.active(), 61, false)
+    has(BP.revert(false), "Macro now has a binding on X")
+    assert(w.keys.X == "MACRO Keep" and w.macros.Keep)
+end)
+
+test("explicit shared macro edits identify the excluded button using them", function()
+    CreateMacro("Shared", 42, "/dance", true)
+    char().slots[61] = { "macro", "Shared" }
+    P.setBarManaged(P.active(), 61, false)
+    local text = plan("MACRO\tShared\t42\t1\t/wave")
+    local _, _, details = BP.run(text, true)
+    has(details, "Editing macro Shared also changes its use on excluded Bar 2 button 1 [61]")
+    has(BP.run(text, false), "Done:")
+    assert(w.macros.Shared.body == "/wave" and idAt(61) == "Shared")
+    revert()
+    assert(w.macros.Shared.body == "/dance" and idAt(61) == "Shared")
+end)
+
+local function withAPI(api, run)
+    local saved = {}
+    for name, fn in pairs(api) do saved[name], _G[name] = _G[name], fn end
+    local ok, err = pcall(run)
+    for name in pairs(api) do _G[name] = saved[name] end
+    assert(ok, err)
+end
+
+local selected = { GetSelectedMacroIcon = function(index)
+    local name = GetMacroInfo(index)
+    return name and w.macros[name].icon
+end }
+local macroInfo = GetMacroInfo
+local function displayIcon(index)
+    local name, icon, body = macroInfo(index)
+    if icon == 134400 then icon = w.texture or 132140 end
+    return name, icon, body
+end
+
+test("dynamic macro selection survives target changes, export, edit, reload and Revert", function()
+    withAPI({ C_Macro = selected, GetMacroInfo = displayIcon }, function()
+        CreateMacro("Charge", 134400, "#showtooltip\n/cast Charge", true)
+        char().slots[97] = { "macro", "Charge" }
+        local text = plan("MACRO\tCharge\t42\t1\t#showtooltip Bear\\n/cast Bear\nSLOT\t73\tmacro\tCharge")
+        has(BP.run(text, true), "Check OK")
+        w.texture = 12345
+        assert(tonumber(BP.parse(BP.exportCurrent()).macros[1].icon) == 134400)
+        has(BP.run(text, false), "Done:")
+        assert(w.macros.Charge.icon == 42 and P.active().undo.ops[1].before.icon == 134400)
+        reload(); revert()
+        assert(w.macros.Charge.icon == 134400 and idAt(97) == "Charge" and not idAt(73))
+        apply(plan("MACRO\tClaw\t134400\t1\t#showtooltip\\n/cast Claw\nSLOT\t73\tmacro\tClaw"))
+        assert(P.active().undo.ops[1].after.icon == 134400)
+        w.texture = 34567
+        reload(); revert()
+        assert(not w.macros.Claw and not idAt(73))
+    end)
+end)
+
+test("fixed selected icon edit matching the displayed texture still blocks Apply and Revert", function()
+    withAPI({ C_Macro = selected, GetMacroInfo = displayIcon }, function()
+        local text = plan("MACRO\tClaw\t134400\t1\t#showtooltip Claw\\n/cast Claw")
+        apply(text)
+        has(BP.run(text, true), "Check OK")
+        w.macros.Claw.icon = 132140
+        local summary, _, details = BP.run(text, false)
+        has(summary, "Run Check again")
+        has(details, "Macro Claw / before / icon: 134400 -> 132140")
+        local _, _, revertDetails = BP.revert(false)
+        has(revertDetails, "Macro Claw / icon: 134400 -> 132140")
+        assert(P.active().undo and w.macros.Claw.icon == 132140)
+    end)
+end)
+
+test("an explicit icon-only edit is reviewed, verified and reversible", function()
+    withAPI({ C_Macro = selected, GetMacroInfo = displayIcon }, function()
+        CreateMacro("Claw", 134400, "#showtooltip Claw", true)
+        local text = plan("MACRO\tClaw\t132140\t0\t#showtooltip Claw")
+        local _, _, details = BP.run(text, true)
+        has(details, "Update character macro Claw")
+        has(BP.run(text, false), "Done:")
+        assert(w.macros.Claw.icon == 132140 and w.macros.Claw.perChar)
+        revert()
+        assert(w.macros.Claw.icon == 134400)
+    end)
+end)
+
+test("old observed-icon snapshot reverts a created macro only with the reviewed selection", function()
+    withAPI({ C_Macro = selected, GetMacroInfo = displayIcon }, function()
+        apply(plan("MACRO\tClaw\t134400\t1\t#showtooltip Claw"))
+        local u = P.active().undo
+        u.selectedIcons, u.ops[1].after.icon = nil, 132140
+        reload()
+        w.macros.Claw.icon = 132140
+        has(BP.revert(false), "changed since Apply")
+        w.macros.Claw.icon = 134400
+        revert()
+        assert(not w.macros.Claw)
+    end)
+end)
+
+test("partial macro write restores actual prior macro and binding before publishing history", function()
+    local edit = EditMacro
+    CreateMacro("Old", 17, "/wave", true)
+    withAPI({ EditMacro = function(i,n,icon,body)
+        edit(i,n,icon,body == "/dance" and "/wrong" or body)
+    end }, function()
+        local text = plan("MACRO\tOld\t42\t1\t/dance\nENSURE\tB\tBUTTON")
+        has(BP.run(text, true), "Check OK")
+        has(BP.run(text, false), "Previous state restored")
+        assert(w.macros.Old.icon == 17 and w.macros.Old.body == "/wave" and w.keys.B == "PACK" and not P.active().undo)
+    end)
+end)
+
+test("a creation returned in the wrong scope is rejected and recovered by verified index", function()
+    local create = CreateMacro
+    withAPI({ CreateMacro = function(n,icon,body,charMacro) return create(n,icon,body,not charMacro) end }, function()
+        local text = plan("MACRO\tNew\t42\t1\t/dance")
+        has(BP.run(text, true), "Check OK")
+        has(BP.run(text, false), "Previous state restored")
+        assert(not w.macros.New and not P.active().lastApplied)
+    end)
+end)
+
+test("only an Auto-fill event fills newly enabled empty slots from the applied profile", function()
+    local p = P.active()
+    P.setBarManaged(p, 61, false)
+    local saved = plan("SLOT\t61\tspell\tThorns\nSLOT\t62\tspell\tWrath\nENSURE\tZ\tMULTIACTIONBAR1BUTTON1")
+    apply(saved)
+    event()
+    assert(not idAt(61) and not idAt(62) and not w.keys.Z)
+    w.event("SPELLS_CHANGED")
+    P.setBarManaged(p, 61, true)
+    local draft = plan("SLOT\t61\tspell\tWrath\nENSURE\tZ\tBUTTON")
+    has(BP.run(draft, true), "Check OK")
+    assert(not idAt(61) and not idAt(62) and not w.keys.Z)
+    w.timer()
+    assert(idAt(61) == 1 and idAt(62) == 5 and not w.keys.Z and p.text == saved)
+    local summary, _, details = BP.run(draft, false)
+    has(summary, "Run Check again")
+    has(details, "Bar 2 button 1 [61] / current / kind")
+    assert(idAt(61) == 1 and not w.keys.Z and p.lastApplied == saved)
+end)
+
+test("reapplying while excluded preserves only an already approved pending target", function()
+    spell(61, 1); spell(62, 1)
+    apply(plan("SLOT\t61\tspell\tDash\nSLOT\t62\tspell\tProwl"))
+    local p = P.active()
+    P.setBarManaged(p, 61, false)
+    char().known[3], char().known[4] = true, true
+    apply(plan("SLOT\t61\tspell\tDash\nSLOT\t62\tspell\tWrath"))
+    assert(p.pending[61] and not p.pending[62])
+    event()
+    assert(idAt(61) == 1 and idAt(62) == 1)
+    P.setBarManaged(p, 61, true)
+    event(); BP.levelUpdates("review"); BP.levelUpdates("confirm")
+    assert(idAt(61) == 3 and idAt(62) == 1)
+end)
+
+test("availability, profile and leveling confirmation diagnostics identify the changed fields", function()
+    local text = plan("SLOT\t73\tspell\tDash")
+    spell(73, 1)
+    has(BP.run(text, true), "Check OK")
+    P.active().overwrite, char().known[3] = true, true
+    local _, _, details = BP.run(text, false)
+    has(details, 'Cat Form button 1 [73] / unavailable: "not learned yet" -> (absent)')
+    has(details, "intended / id: (absent) -> 3")
+    has(details, "Profile / overwrite: false -> true")
+    assert(idAt(73) == 1)
+    char().known[3] = nil
+    apply(text)
+    char().known[3] = true
+    BP.levelUpdates("review")
+    spell(73, 5)
+    local _, _, changed = BP.levelUpdates("confirm")
+    has(changed, "[73] / before / id: 1 -> 5")
+    assert(idAt(73) == 5)
+end)
+
+-- Model two physical spells with the same visible override in each form.
+-- Only the reverse action-bar query distinguishes the two stored actions.
+test("form overrides preserve per-slot identity across Check, Apply, export and Revert", function()
+    local names = { [101] = "Feral Charge (Cat)", [102] = "Feral Charge (Bear)" }
+    local form = 201
+    char().known[101], char().known[102] = true, true
+    local rawAction = GetActionInfo
+    local api = {
+        Enum = { SpellBookSpellBank = { Player = 0 }, SpellBookItemType = { Spell = 1 }, ActionBarSet = { Mkb = 1 } },
+        C_Spell = { GetSpellName = function(id) return names[id] end },
+        C_SpellBook = {
+            GetNumSpellBookSkillLines = function() return 1 end,
+            GetSpellBookSkillLineInfo = function() return { numSpellBookItems = 2 } end,
+            GetSpellBookItemInfo = function(index)
+                return { name = "Current charge", spellID = form, actionID = 100 + index, itemType = 1 }
+            end,
+            PickupSpellBookItem = function(i) PickupSpell(100 + i) end,
+            FindBaseSpellByID = function(id) return id == form and 101 or id end,
+            FindSpellOverrideByID = function(id) return names[id] and form or id end,
+        },
+        C_ActionBar = { FindSpellActionButtons = function(base, bank)
+            assert(bank == 1)
+            local slots = {}
+            for slot, action in pairs(char().slots) do
+                if action[2] == base then table.insert(slots, slot) end
+            end
+            return slots
+        end },
+        GetActionInfo = function(slot)
+            local kind, id = rawAction(slot)
+            if names[id] then return kind, form end
+            return kind, id
+        end,
+    }
+    withAPI(api, function()
+        spell(73, 101); spell(97, 102)
+        local planText = plan("SLOT\t73\tspell\tFeral Charge (Cat)\nSLOT\t97\tspell\tFeral Charge (Bear)\n"
+            .. "SLOT\t74\tspell\tspell:102\nSLOT\t98\tspell\tspell:101")
+        for _, active in ipairs({201, 202, 203, 204}) do
+            form = active
+            local export = BP.parse(BP.exportCurrent())
+            assert(export.slots[1].value == "spell:101" and export.slots[2].value == "spell:102")
+            has(BP.run(planText, true), "Check OK")
+            form = active + 1
+            has(BP.run(planText, false), "Done:")
+            assert(idAt(73) == 101 and idAt(97) == 102 and idAt(74) == 102 and idAt(98) == 101)
+            revert()
+        end
+        has(BP.run(planText, true), "Check OK")
+        spell(97, 101) -- same visible texture and reported spell, different stored identity
+        local _, _, changes = BP.run(planText, false)
+        has(changes, "[97] / current / id: 102 -> 101")
+        assert(not idAt(74))
+    end)
+end)
+
+test("changed name-only spell resolution requires Check and exact qualifications stay strict", function()
+    local id = 31
+    char().known[31], char().known[32] = true, true
+    withAPI({ C_Spell = {
+        GetSpellIDForSpellIdentifier = function() return id end,
+        GetSpellName = function() return "Feral Charge" end,
+        GetSpellSubtext = function() return nil end,
+    } }, function()
+        local text = plan("SLOT\t97\tspell\tFeral Charge\nSLOT\t73\tspell\tFeral Charge (Cat)\nSLOT\t74\tspell\tspell:31")
+        has(BP.run(text, true), "Check OK")
+        id = 32
+        local _, _, changed = BP.run(text, false)
+        has(changed, "[97] / intended / id: 31 -> 32")
+        assert(not idAt(97))
+        apply(text)
+        assert(idAt(97) == 32 and not idAt(73) and idAt(74) == 31 and P.active().pending[73])
+    end)
+end)
+
+test("book order cannot choose between two named form variants", function()
+    char().known[41], char().known[42] = true, true
+    local variants = { "Cat", "Bear" }
+    withAPI({
+        GetNumSpellTabs = function() return 1 end,
+        GetSpellTabInfo = function() return nil, nil, 0, 2 end,
+        GetSpellBookItemName = function(i) return "Feral Charge", variants[i], 40 + i end,
+        GetSpellBookItemInfo = function(i) return "SPELL", 40 + i end,
+        PickupSpellBookItem = function(i) PickupSpell(40 + i) end,
+    }, function()
+        local text = plan("SLOT\t73\tspell\tFeral Charge (Cat)\nSLOT\t97\tspell\tFeral Charge (Bear)\nSLOT\t1\tspell\tFeral Charge")
+        has(BP.run(text, true), "Multiple spell variants for Feral Charge")
+        assert(not P.active().text and not idAt(73) and not idAt(97))
+        apply(plan("SLOT\t73\tspell\tFeral Charge (Cat)\nSLOT\t97\tspell\tFeral Charge (Bear)"))
+        assert(idAt(73) == 41 and idAt(97) == 42 and not idAt(1))
+    end)
 end)
 
 print(passed .. " passed, " .. failed .. " failed")

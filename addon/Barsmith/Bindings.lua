@@ -114,8 +114,9 @@ function B.key(raw)
     return prefix .. k
 end
 
-function B.preview(plan, s)
-    local p = { before = s, desired = {}, changes = {}, lines = {}, details = {}, warnings = {}, errors = {},
+function B.preview(plan, s, protected)
+    protected = protected or {}
+    local p = { before = s, protected = protected, excluded = {}, desired = {}, changes = {}, lines = {}, details = {}, warnings = {}, errors = {},
         same = 0, displaced = 0, preserved = 0, orphaned = 0, overrideWarnings = 0 }
     local assigned, touched, allowed, lost = {}, {}, {}, {}
     local materialOverrides, blockingOverrides = {}, {}
@@ -133,23 +134,39 @@ function B.preview(plan, s)
         local r = s.rows[command]
         if r and (r.context ~= 0 or r.custom) then problem("Unsupported binding context or custom control: " .. command) end
     end
+    -- A BP1 row is an exact set. If a requested key is protected, skip
+    -- the whole destination row so its other keys cannot be removed.
+    local blockedRows, reserved = {}, {}
     for _, b in ipairs(plan.binds) do
-        writable(b.command)
-        if b.op == "ALLOWORPHAN" then
-            allowed[b.command] = true
-        elseif b.op == "REMOVE" then
-            local old = s.owners[b.key]
-            if old and old ~= b.command then problem("Removal owner changed: " .. b.key .. " now belongs to " .. old) end
-            claim(b.key, false)
+        local why = protected[b.command] or protected[s.owners[b.key]]
+        if why and b.key then
+            reserved[b.key] = true
+            if plan.version == 1 then blockedRows[b.command] = why end
+        end
+    end
+    for _, b in ipairs(plan.binds) do
+        local old = s.owners[b.key]
+        local why = protected[b.command] or protected[old] or blockedRows[b.command]
+        if why then
+            table.insert(p.excluded, ("Skip %s %s%s (excluded %s%s)."):format(
+                b.op, b.key and b.key .. " -> " or "", b.command, why, old and ", current owner " .. old or ""))
         else
-            claim(b.key, b.command)
-            assigned[b.command] = true
+            writable(b.command)
+            if b.op == "ALLOWORPHAN" then
+                allowed[b.command] = true
+            elseif b.op == "REMOVE" then
+                if old and old ~= b.command then problem("Removal owner changed: " .. b.key .. " now belongs to " .. old) end
+                claim(b.key, false)
+            else
+                claim(b.key, b.command)
+                assigned[b.command] = true
+            end
         end
     end
     if plan.version == 1 then
         for cmd in pairs(assigned) do
             for k in pairs(s.rows[cmd].keys) do
-                if p.desired[k] == nil then claim(k, false) end
+                if p.desired[k] == nil and not reserved[k] then claim(k, false) end
             end
         end
     end
@@ -244,10 +261,15 @@ end
 -- bulk clear, no profile switching, no writes for a no-op.
 function B.commit(plan, p)
     local s = B.capture(plan.binds, p.before.rows)
-    local fresh = B.preview(plan, s)
-    if #p.errors > 0 or #fresh.errors > 0 or s.set ~= p.before.set or
-        not sameMap(s.owners, p.before.owners) or not sameMap(s.overrides, p.before.overrides) then
-        return nil, "Bindings changed or Check is blocked. Run Check again."
+    local fresh = B.preview(plan, s, p.protected)
+    local changed = {}
+    local C = Barsmith.changes
+    C.differences(changed, "Binding set", p.before.set, s.set)
+    C.differences(changed, "Key owner", p.before.owners, s.owners)
+    C.differences(changed, "Runtime override", p.before.overrides, s.overrides)
+    for _, msg in ipairs(fresh.errors) do table.insert(changed, msg) end
+    if #p.errors > 0 or #changed > 0 then
+        return nil, { message = "Bindings changed or Check is blocked. Run Check again.", details = changed }
     end
     if #p.changes == 0 then return true end
     local attempted, saving, after = {}, false, nil
