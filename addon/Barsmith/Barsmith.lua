@@ -15,7 +15,7 @@
 Barsmith = Barsmith or {}
 local BP = Barsmith
 
-local B = BP.bindings
+local B, T = BP.bindings, BP.transformations
 local DEFAULT_ICON = 134400
 local MACRO_BODY_MAX = 255
 
@@ -302,6 +302,20 @@ local function overrideSpell(id)
     return find and id and find(id)
 end
 
+-- The spellbook query may return the input ID when an override is inactive.
+-- Check both sources and let the caller verify the proposed physical action.
+local function visitSpellBases(id, visit)
+    if not id or id <= 0 then return end
+    if C_SpellBook and C_SpellBook.FindBaseSpellByID then visit(C_SpellBook.FindBaseSpellByID(id)) end
+    if C_Spell and C_Spell.GetBaseSpell then visit(C_Spell.GetBaseSpell(id)) end
+end
+
+local function overridesSpell(base, alias)
+    return base and base ~= alias
+        and ((C_SpellBook and C_SpellBook.FindSpellOverrideByID and C_SpellBook.FindSpellOverrideByID(base) == alias)
+            or (C_Spell and C_Spell.GetOverrideSpell and C_Spell.GetOverrideSpell(base) == alias))
+end
+
 -- Exclude override-only matches when the plan asks for a specific variant.
 local function independentlyKnown(id)
     local bank = Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player
@@ -310,44 +324,43 @@ local function independentlyKnown(id)
         or (C_SpellBook and C_SpellBook.IsSpellKnown and C_SpellBook.IsSpellKnown(id))
 end
 
--- A name lookup can see spells outside the enumerated skill lines. Confirm the
--- returned ID belongs to this player before using it as a pickup target.
-local function learnedSpellIDByName(name, rank)
-    local overrideOnly
-    local function matches(id)
-        if not id or id <= 0 then return false end
+local function spellNameKey(name)
+    return (name or ""):lower():gsub("%s+%(", "(")
+end
+
+local function matchesSpellName(wanted, name, subtext)
+    if not name or name == "" then return false end
+    return spellNameKey(name) == wanted
+        or (subtext and subtext ~= "" and spellNameKey(name .. "(" .. subtext .. ")") == wanted)
+end
+
+-- Identifier APIs may return the currently displayed spell, even for a name
+-- with a different qualifier. Only an exact name/subtext identifies an alias.
+local function learnedSpellIDByName(name, qualifier, aliases)
+    local wanted = spellNameKey(name)
+    local learned, overrideOnly
+    local function inspect(id)
+        if not id or id <= 0 then return end
         local passive = (C_Spell and C_Spell.IsSpellPassive) or IsPassiveSpell
-        if passive and passive(id) then return false end
-        if rank then
-            -- A parenthesis can be part of the actual name or an explicit rank.
-            -- Reject an API result that supplies a different subtext.
-            local sub = getSpellSubtext(id)
-            local actualName = (getSpellName(id) or ""):lower():gsub("%s+%(", "(")
-            local wanted = name:lower():gsub("%s+%(", "(")
-            if actualName ~= wanted then
-                if not sub or sub:lower() ~= rank then return false end
-                if actualName ~= "" and actualName ~= wanted:match("^(.-)%(") then return false end
-            end
+        if passive and passive(id) then return end
+        local actual, sub = getSpellName(id), getSpellSubtext(id)
+        if matchesSpellName(wanted, actual, sub) then
+            -- Numbered subtexts can be localized ranks. Keep them exact.
+            if not (qualifier and qualifier:find("%d")) or spellNameKey(actual) == wanted then aliases[id] = true end
+        elseif qualifier and (actual and actual ~= "" or (sub or ""):lower() ~= qualifier) then
+            return
         end
-        if rank and not independentlyKnown(id) then
-            if spellKnown(id) then overrideOnly = id end
-            return false
-        end
-        return spellKnown(id)
+        if not spellKnown(id) then return end
+        if qualifier and not independentlyKnown(id) then overrideOnly = overrideOnly or id
+        else learned = learned or id end
     end
-    if C_Spell and C_Spell.GetSpellIDForSpellIdentifier then
-        local id = C_Spell.GetSpellIDForSpellIdentifier(name)
-        if matches(id) then return id end
-    end
+    if C_Spell and C_Spell.GetSpellIDForSpellIdentifier then inspect(C_Spell.GetSpellIDForSpellIdentifier(name)) end
     if C_Spell and C_Spell.GetSpellInfo then
         local info = C_Spell.GetSpellInfo(name)
-        if info and matches(info.spellID) then return info.spellID end
+        if info then inspect(info.spellID) end
     end
-    if GetSpellInfo then
-        local id = select(7, GetSpellInfo(name))
-        if matches(id) then return id end
-    end
-    return nil, overrideOnly
+    if GetSpellInfo then inspect(select(7, GetSpellInfo(name))) end
+    return learned, overrideOnly
 end
 
 local function getItemName(id)
@@ -378,7 +391,7 @@ end
 
 -- Usable (non-passive) spells in the player's spellbook, in book order.
 -- Ranks of a spell are listed lowest first, so the last match is the highest rank.
-local function spellbookEntries()
+local function spellbookEntries(verifyContext)
     local count = 0
     if C_SpellBook and C_SpellBook.GetNumSpellBookSkillLines then
         for t = 1, C_SpellBook.GetNumSpellBookSkillLines() do
@@ -391,18 +404,19 @@ local function spellbookEntries()
             count = math.max(count, (offset or 0) + (num or 0))
         end
     end
-    local list = {}
+    local list = { byID = {}, transforms = T.view(verifyContext) }
     for i = 1, count do
-        local name, rank, spellID, overrideID, usable
+        local name, rank, spellID, overrideID, overrideName, overrideRank, usable
         if useNewSpellBook() then
             local info = C_SpellBook.GetSpellBookItemInfo(i, Enum.SpellBookSpellBank.Player)
-            if info and info.itemType == Enum.SpellBookItemType.Spell and not info.isPassive and info.name then
+            if info and info.itemType == Enum.SpellBookItemType.Spell and not info.isPassive and not info.isOffSpec and info.name then
                 name, rank, spellID = info.name, info.subName, info.spellID
                 if info.actionID and info.actionID ~= info.spellID then
+                    overrideName, overrideRank = info.name, info.subName
                     spellID, overrideID = info.actionID, info.spellID
                     name, rank = getSpellName(spellID), getSpellSubtext(spellID)
                 end
-                usable = name and spellID
+                usable = spellID and (name or overrideName)
             end
         else
             name, rank, spellID = GetSpellBookItemName(i, BOOK)
@@ -411,13 +425,43 @@ local function spellbookEntries()
             spellID = spellID or bookID
             usable = name and kind == "SPELL" and not (IsPassiveSpell and IsPassiveSpell(i, BOOK))
         end
-        if usable then
-            list[#list + 1] = { index = i, name = name, rank = rank or "", spellID = spellID, overrideID = overrideID }
+        if usable and type(spellID) == "number" and spellID > 0 then
+            list[#list + 1] = { index = i, name = name or "", rank = rank or "", spellID = spellID,
+                overrideID = overrideID, overrideName = overrideName, overrideRank = overrideRank }
+            list.byID[spellID] = list[#list]
         end
     end
     return list
 end
 BP.changes.spellbookEntries = spellbookEntries
+
+-- Scope the forward index to one book read. Check, Apply, export and event
+-- scans each get a fresh view without querying every spell for every slot.
+local function bookBases(book, alias)
+    if not book.basesByOverride then
+        local byOverride, overridden = {}, {}
+        local function record(base, display)
+            if not display or display <= 0 or display == base then return end
+            byOverride[display] = byOverride[display] or {}
+            byOverride[display][base], overridden[base] = true, true
+        end
+        local function forward(base)
+            if C_SpellBook and C_SpellBook.FindSpellOverrideByID then record(base, C_SpellBook.FindSpellOverrideByID(base)) end
+            if C_Spell and C_Spell.GetOverrideSpell then record(base, C_Spell.GetOverrideSpell(base)) end
+        end
+        for _, entry in ipairs(book) do
+            record(entry.spellID, entry.overrideID)
+            forward(entry.spellID)
+        end
+        local v = book.transforms
+        for _, talent in ipairs(v and v.talents or {}) do
+            if talent.replaces and talent.replaces > 0 then record(talent.replaces, talent.id) end
+            if not book.byID[talent.id] then forward(talent.id) end
+        end
+        book.basesByOverride, book.overridden = byOverride, overridden
+    end
+    return book.basesByOverride[alias] or {}
+end
 
 -- A displayed override can represent different stored spells on different
 -- buttons. Only substitute a base ID when the action-bar API locates that
@@ -429,34 +473,6 @@ local function slotContainsSpell(slot, id)
         if slot == button then return true end
     end
     return false
-end
-
-function BP.changes.slotSpellID(slot, reported, book)
-    local verified, competing
-    local function locate(base)
-        if not base or base <= 0 or base == reported or base == verified then return end
-        competing = base
-        if slotContainsSpell(slot, base) then
-            assert(not verified, "Ambiguous base spell on " .. slotLabel(slot) .. " [" .. slot .. "]")
-            verified = base
-        end
-    end
-    locate(baseSpell(reported))
-    if C_ActionBar and C_ActionBar.GetSpell and C_ActionBar.FindSpellActionButtons then
-        local candidate = C_ActionBar.GetSpell(slot)
-        -- GetSpell can also return the effective spell. Reverse lookup is
-        -- documented for base IDs; an override alias is not a second base.
-        if candidate and candidate ~= reported and baseSpell(candidate) ~= reported
-            and overrideSpell(reported) ~= candidate then locate(candidate) end
-    end
-    for _, entry in ipairs(book or spellbookEntries()) do
-        if entry.overrideID == reported then locate(entry.spellID) end
-    end
-    if competing and not verified and not slotContainsSpell(slot, reported) then
-        error(("Cannot identify the physical spell on %s [%d]: reported %s, possible base %s, no matching slot membership.")
-            :format(slotLabel(slot), slot, tostring(reported), tostring(competing)))
-    end
-    return verified or reported
 end
 
 local function pickupBookEntry(index)
@@ -475,6 +491,54 @@ local function exactBookIndex(id)
             if row and row.itemType == Enum.SpellBookItemType.Spell and not row.isPassive and row.actionID == id then return i end
         end
     end
+end
+
+local function placeableBase(book, id)
+    if not id or id <= 0 then return false end
+    if book.byID[id] or exactBookIndex(id) then return true end
+    local passive = (C_Spell and C_Spell.IsSpellPassive) or IsPassiveSpell
+    return independentlyKnown(id) and not (passive and passive(id))
+end
+
+function BP.changes.slotSpellID(slot, reported, book)
+    local verified, competing
+    local function locate(base)
+        if not base or base <= 0 or base == reported or base == verified then return end
+        competing = base
+        if slotContainsSpell(slot, base) then
+            assert(not verified, "Ambiguous base spell on " .. slotLabel(slot) .. " [" .. slot .. "]")
+            verified = base
+        end
+    end
+    book = book or spellbookEntries()
+    visitSpellBases(reported, locate)
+    if C_ActionBar and C_ActionBar.GetSpell and C_ActionBar.FindSpellActionButtons then
+        local candidate = C_ActionBar.GetSpell(slot)
+        -- GetSpell can also return the effective spell. Reverse lookup is
+        -- documented for base IDs; an override alias is not a second base.
+        if candidate and candidate ~= reported and baseSpell(candidate) ~= reported
+            and not (C_Spell and C_Spell.GetBaseSpell and C_Spell.GetBaseSpell(candidate) == reported)
+            and not overridesSpell(reported, candidate) then locate(candidate) end
+    end
+    for base in pairs(bookBases(book, reported)) do locate(base) end
+    local v = book.transforms
+    local history = v and v.edges[reported]
+    if history and not verified then
+        local containsReported = slotContainsSpell(slot, reported)
+        for base in pairs(history) do
+            if placeableBase(book, base) then
+                if containsReported then
+                    assert(not slotContainsSpell(slot, base), ("Ambiguous physical spell on %s [%d]: both %d and observed base %d match.")
+                        :format(slotLabel(slot), slot, reported, base))
+                else locate(base) end
+            end
+        end
+    end
+    if competing and not verified and not slotContainsSpell(slot, reported) then
+        error(("Cannot identify the physical spell on %s [%d]: reported %s, possible base %s, no matching slot membership.")
+            :format(slotLabel(slot), slot, tostring(reported), tostring(competing)))
+    end
+    return verified or reported
 end
 
 local function spellTarget(id, entry)
@@ -539,6 +603,87 @@ function BP.changes.spellCursor(slot, wanted, requested)
 end
 BP.changes.slotContainsSpell = slotContainsSpell
 
+-- Resolve named display spells to physical player actions. Exact book rows
+-- take precedence. A directed client relationship can identify a learned
+-- base even when the displayed spell itself is absent from the current book.
+local function namedSpellTarget(wanted, stem, qualifier, aliases, book)
+    local entries, targets = book.byID, {}
+    local v = book.transforms
+    for _, entry in ipairs(book) do
+        local alias = entry.overrideID
+        if alias then
+            local name = getSpellName(alias)
+            local numbered = qualifier and qualifier:find("%d")
+            if spellNameKey(entry.overrideName) == wanted or spellNameKey(name) == wanted
+                or (not numbered and (matchesSpellName(wanted, entry.overrideName, entry.overrideRank)
+                    or matchesSpellName(wanted, name, getSpellSubtext(alias)))) then
+                aliases[alias] = true
+            end
+        end
+    end
+    -- Selected talent definitions and forward-only clients can expose a
+    -- numeric pair even if the identifier lookup for this name returns nil.
+    bookBases(book, nil)
+    for alias in pairs(book.basesByOverride) do
+        local name = getSpellName(alias)
+        if spellNameKey(name) == wanted or (not (qualifier and qualifier:find("%d"))
+            and matchesSpellName(wanted, name, getSpellSubtext(alias))) then aliases[alias] = true end
+    end
+    for alias in pairs(aliases) do
+        if entries[alias] or exactBookIndex(alias) then
+            targets[alias] = true
+        else
+            local related = false
+            local function consider(base)
+                if not base or base <= 0 or base == alias then return end
+                if not placeableBase(book, base) then return end
+                if v then T.record(v.pending, base, alias, wanted) end
+                targets[base], related = true, true
+            end
+            visitSpellBases(alias, consider)
+            for base in pairs(bookBases(book, alias)) do consider(base) end
+            if qualifier and not related then
+                -- Some clients expose the learned base only through a name
+                -- lookup. The stem alone never authorizes a placement.
+                local base = learnedSpellIDByName(stem, nil, {})
+                if overridesSpell(base, alias) then consider(base) end
+            end
+            if not related and independentlyKnown(alias) then targets[alias] = true end
+        end
+    end
+    -- Numeric subtexts may be localized ranks. Never convert one through
+    -- history. A current, exact book row still takes its ordinary path.
+    local history = v and not (qualifier and qualifier:find("%d")) and v.edges
+    for alias, bases in pairs(history or {}) do
+        for base, names in pairs(bases) do
+            if names[wanted] and placeableBase(book, base) then
+                -- An independent learned variant always gets its normal name
+                -- resolution. A historical label alone cannot authorize it.
+                if not entries[alias] and not exactBookIndex(alias) and not independentlyKnown(alias) then
+                    -- A new exact name lookup can identify a different spell
+                    -- even before it is learned. Do not fill from an old name.
+                    local conflicting = next(aliases) and not aliases[alias] and not targets[base]
+                    visitSpellBases(alias, function(live)
+                        if live and live > 0 and live ~= alias and live ~= base then conflicting = true end
+                    end)
+                    for owner in pairs(bookBases(book, alias)) do
+                        if owner ~= base then conflicting = true end
+                    end
+                    if conflicting then return nil, "observed and current spell relationships disagree; use an exported spell:ID" end
+                    targets[base] = true
+                end
+            end
+        end
+    end
+    local id = next(targets)
+    if id then
+        if next(targets, id) then
+            return nil, "multiple learned actions match this spell name; use an exported spell:ID"
+        end
+        return spellTarget(id, entries[id])
+    end
+end
+
 -- value: "Lightning Bolt", "Healing Wave(Rank 1)" or "spell:403".
 -- Returns { kind, id, pickup } or nil, reason.
 local function resolveSpell(value, book)
@@ -556,12 +701,18 @@ local function resolveSpell(value, book)
         return spellTarget(id)
     end
     local base, rank = value:match("^(.-)%s*%(([^()]*)%)$")
-    base = (base or value):lower()
+    local stem = base or value
+    base = stem:lower()
     rank = rank and trim(rank):lower()
+    local wanted = spellNameKey(value)
     local found, unqualified, variant, ambiguous
     for _, e in ipairs(book) do
         local name = e.name:lower()
-        if name == value:lower() or (name == base and (not rank or e.rank:lower() == rank)) then
+        if spellNameKey(e.name) == wanted or (name == base and (not rank or e.rank:lower() == rank)) then
+            if rank and found and found.spellID ~= e.spellID and (found.rank == e.rank
+                or not (found.rank:find("%d") and e.rank:find("%d"))) then
+                return nil, "multiple learned actions match this spell name; use an exported spell:ID"
+            end
             found = e
             if not rank and e.rank == "" then unqualified = e end
             if not rank and e.rank ~= "" and not e.rank:find("%d") then
@@ -581,21 +732,26 @@ local function resolveSpell(value, book)
     end
     -- Preserve the book's rank selection above. On a miss, ask the client for
     -- the learned form/override by name, keeping any rank or form qualifier.
-    local overrideOnly
-    id, overrideOnly = learnedSpellIDByName(value, rank)
-    if not id and rank then
-        local qualified = value:gsub("%s+%(([^()]*)%)$", "(%1)")
-        if qualified ~= value then
-            local other
-            id, other = learnedSpellIDByName(qualified, rank)
-            overrideOnly = overrideOnly or other
-        end
+    local aliases, overrideOnly = {}
+    id, overrideOnly = learnedSpellIDByName(value, rank, aliases)
+    if rank then
+        local compact = value:gsub("%s+%(", "(")
+        local alternate = compact ~= value and compact or value:gsub("%(", " (", 1)
+        local other, otherOverride = learnedSpellIDByName(alternate, rank, aliases)
+        id, overrideOnly = id or other, overrideOnly or otherOverride
+    end
+    local numberedRank = rank and rank:match("^rank%s*%d+$")
+    if not numberedRank then
+        local target, why = namedSpellTarget(wanted, stem, rank, aliases, book)
+        if target or why then return target, why end
     end
     if not id and overrideOnly and exactBookIndex(overrideOnly) then id = overrideOnly end
     if id then
         if not rank then
             local baseID = baseSpell(id)
-            if baseID and baseID ~= id and (getSpellName(baseID) or ""):lower() == base and spellKnown(baseID) then
+            local passive = (C_Spell and C_Spell.IsSpellPassive) or IsPassiveSpell
+            if baseID and baseID ~= id and (getSpellName(baseID) or ""):lower() == base
+                and independentlyKnown(baseID) and not (passive and passive(baseID)) then
                 id = baseID
             end
         end
@@ -604,11 +760,81 @@ local function resolveSpell(value, book)
         end
         return spellTarget(id)
     end
-    if overrideOnly then return nil, "only available as a temporary override (spell:" .. overrideOnly .. ")" end
-    if rank then
+    if overrideOnly then return nil, "temporary override (spell:" .. overrideOnly .. "); cannot verify its learned action" end
+    if numberedRank then
         return nil, "that rank isn't in your spellbook (turn on Show All Spell Ranks)"
     end
+    if rank then return nil, "cannot verify a learned action for this spell name and qualifier; visit its active state or use an exported spell:ID" end
     return nil, "not learned yet"
+end
+
+-- Read-only with respect to the game. Observe even with Auto-fill off, in
+-- combat or with an occupied cursor. Never call a resolved pickup closure.
+local checkedNamesText, checkedCharacter
+local observedPlanText, observedCheckText, observedNames
+local function observeTransforms(eventBase, eventAlias)
+    local v = T.view(true)
+    if not v then return end
+    local book = spellbookEntries()
+    local function record(base, alias, name, sub)
+        if not base or not alias or base == alias or not placeableBase(book, base) then return end
+        -- Preserve full literal names. A plain name with a ranked/qualified
+        -- subtext is evidence only for that exact spelling and subtext.
+        if name and (not sub or sub == "" or name:match("%([^()]+%)$")) then
+            T.record(v.edges, base, alias, spellNameKey(name))
+        elseif name and not sub:find("%d") then
+            T.record(v.edges, base, alias, spellNameKey(name .. "(" .. sub .. ")"))
+        else T.record(v.edges, base, alias) end
+    end
+    if eventAlias then
+        record(eventBase, eventAlias, getSpellName(eventAlias), getSpellSubtext(eventAlias))
+        T.save(v)
+        return
+    end
+    bookBases(book, nil)
+    for alias, bases in pairs(book.basesByOverride) do
+        for base in pairs(bases) do record(base, alias, getSpellName(alias), getSpellSubtext(alias)) end
+    end
+    for _, entry in ipairs(book) do
+        if entry.overrideID then record(entry.spellID, entry.overrideID, entry.overrideName, entry.overrideRank) end
+        visitSpellBases(entry.spellID, function(base)
+            record(base, entry.spellID, entry.name, entry.rank)
+        end)
+    end
+    -- Some learned actions are missing from enumerated skill lines. Their
+    -- names in an applied plan can still yield a verified numeric API pair.
+    local profile = BP.profiles.active()
+    local text = profile and profile.pending and profile.text
+    local draft = checkedCharacter == v.character and checkedNamesText or nil
+    if text ~= observedPlanText or draft ~= observedCheckText then
+        observedPlanText, observedCheckText, observedNames = text, draft, {}
+        local function watch(planText)
+            local plan = planText and BP.parse(planText)
+            for _, slot in ipairs(plan and plan.slots or {}) do
+                if slot.kind == "spell" and not slot.value:match("^spell:%d+$") then observedNames[slot.value] = true end
+            end
+        end
+        watch(text)
+        if draft ~= text then watch(draft) end
+    end
+    for name in pairs(observedNames or {}) do
+        -- An ambiguous name can block Check. It must not interrupt the
+        -- read-only inspection of the remaining names in the applied plan.
+        pcall(resolveSpell, name, book)
+    end
+    T.save(v)
+end
+
+-- Loading screens and protected combat data can make an optional API read
+-- fail. Discovery must never cancel the existing leveling timer or repeat a
+-- message on every form change.
+local discoveryError
+local function discover(base, alias)
+    local ok, err = pcall(observeTransforms, base, alias)
+    if not ok and not discoveryError then
+        discoveryError = true
+        say("Spell discovery deferred: " .. tostring(err))
+    end
 end
 
 local function resolveItem(value)
@@ -622,7 +848,7 @@ local C, P = BP.changes, BP.profiles
 
 function C.pickup(action)
     if action.kind == "spell" then
-        if independentlyKnown(action.id) then return spellTarget(action.id).pickup end
+        if independentlyKnown(action.id) or exactBookIndex(action.id) then return spellTarget(action.id).pickup end
         for _, entry in ipairs(spellbookEntries()) do
             if entry.spellID == action.id then return spellTarget(action.id, entry).pickup end
         end
@@ -775,7 +1001,7 @@ local function reviewPlan(plan, preview, profile, reapplying)
             end
         end
     end
-    local book = spellbookEntries()
+    local book = spellbookEntries("verify")
     local slots, clearFirst, excluded = managedSlots(plan, profile)
     r.excluded = #excluded
     -- A repeated Apply must not discard an already approved future
@@ -975,10 +1201,14 @@ end
 local function exportSpell(id, book)
     -- Unbooked names can resolve to a different override next time. Preserve
     -- exact IDs for override entries and for actions outside stable book rows.
+    local v = book.transforms
+    for _, bases in pairs(v and v.edges or {}) do
+        if bases[id] and placeableBase(book, id) then return "spell:" .. id end
+    end
     local listed
     for _, entry in ipairs(book) do
         if entry.spellID == id then
-            if entry.overrideID or (entry.rank ~= "" and not entry.rank:find("%d")) then return "spell:" .. id end
+            if (book.overridden and book.overridden[id]) or (entry.rank ~= "" and not entry.rank:find("%d")) then return "spell:" .. id end
             listed = true
         end
     end
@@ -1001,7 +1231,7 @@ function BP.exportCurrent()
     local _, class = UnitClass("player")
     local plan = { name = (UnitName("player") or "?") .. " (from game)", class = class,
         race = UnitRace and (UnitRace("player")) or nil, macros = {}, slots = {}, binds = {} }
-    local book = spellbookEntries()
+    local book = spellbookEntries("verify")
     local seenMacro = {}
     local profile = P.active()
     local saved = profile and profile.pending and profile.text and BP.parse(profile.text)
@@ -1148,6 +1378,7 @@ function BP.run(text, dry)
     if not plan then return stop(err) end
     local _, class = UnitClass("player")
     if plan.class and plan.class ~= class then return stop("This plan is for a different class: " .. plan.class) end
+    if dry then checkedNamesText, checkedCharacter = text, P.character() end
     local ok, result = pcall(function()
         ready()
         local preview = previous and not dry and previous.preview or nil
@@ -1235,7 +1466,7 @@ local function revertPlan(profile)
     C.checkDifferences(planDiff, "Profile plan changed since Apply.")
     local preview = C.reverseBindings(u.bindings, protectedCommands(profile))
     local ops, lines, editedMacros, sharedUses = {}, {}, {}, {}
-    local book = spellbookEntries()
+    local book = spellbookEntries("verify")
     local legacy = not u.selectedIcons and C_Macro and C_Macro.GetSelectedMacroIcon and assert(BP.parse(u.text))
     local included = {}
     for _, op in ipairs(u.ops) do
@@ -1961,6 +2192,7 @@ local queuedTopics = {}
 queueAutoFill = function(topic, learnedID)
     if not topic then queuedTopics.spell, queuedTopics.item, queuedTopics.full = true, true, true
     elseif topic ~= "resume" then queuedTopics[topic] = true end
+    if not topic or topic == "spell" then queuedTopics.observed = nil end
     if type(learnedID) == "number" then
         queuedTopics.learned = queuedTopics.learned or {}
         queuedTopics.learned[learnedID] = true
@@ -1973,6 +2205,10 @@ queueAutoFill = function(topic, learnedID)
             local p = P.active()
             if p and p.undo == auditSnapshot then auditCreated(auditSnapshot) end
             auditSnapshot = nil
+        end
+        if queuedTopics.spell and not queuedTopics.observed then
+            discover()
+            queuedTopics.observed = true
         end
         if InCombatLockdown() then autoAfterCombat = true; return end
         if GetCursorInfo() then autoAfterCursor = true; return end
@@ -1987,15 +2223,28 @@ local events = CreateFrame("Frame")
 -- Not every client has every event (Classic Era has no LEARNED_SPELL_IN_TAB;
 -- newer clients call it LEARNED_SPELL_IN_SKILL_LINE),
 -- and registering an unknown one is an error that would stop the file here.
-for _, ev in ipairs({ "ADDON_LOADED", "PLAYER_ENTERING_WORLD", "SPELLS_CHANGED", "LEARNED_SPELL_IN_TAB", "LEARNED_SPELL_IN_SKILL_LINE", "BAG_UPDATE_DELAYED", "ACTIONBAR_SLOT_CHANGED", "CURSOR_CHANGED", "PLAYER_REGEN_ENABLED" }) do
+local talentEvents = { PLAYER_TALENT_UPDATE = true, ACTIVE_TALENT_GROUP_CHANGED = true,
+    TRAIT_CONFIG_UPDATED = true, PLAYER_PVP_TALENT_UPDATE = true, PLAYER_SPECIALIZATION_CHANGED = true }
+for ev in pairs(talentEvents) do pcall(events.RegisterEvent, events, ev) end
+for _, ev in ipairs({ "UPDATE_SHAPESHIFT_FORM", "UPDATE_STEALTH", "UNIT_PET", "COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED",
+    "ADDON_LOADED", "PLAYER_LOGOUT", "PLAYER_ENTERING_WORLD", "SPELLS_CHANGED", "LEARNED_SPELL_IN_TAB", "LEARNED_SPELL_IN_SKILL_LINE", "BAG_UPDATE_DELAYED", "ACTIONBAR_SLOT_CHANGED", "CURSOR_CHANGED", "PLAYER_REGEN_ENABLED" }) do
     pcall(events.RegisterEvent, events, ev)
 end
-events:SetScript("OnEvent", function(_, event, arg1)
+events:SetScript("OnEvent", function(_, event, arg1, arg2)
     if event == "ADDON_LOADED" then
         if arg1 == "Barsmith" then
             P.init()
         end
+    elseif event == "PLAYER_LOGOUT" then T.save(T.view())
+    elseif talentEvents[event] then
+        if event ~= "PLAYER_SPECIALIZATION_CHANGED" or not arg1 or arg1 == "player" then T.invalidate() end
+    elseif event == "UPDATE_SHAPESHIFT_FORM" or event == "UPDATE_STEALTH" then discover()
+    elseif event == "UNIT_PET" then
+        if arg1 == "player" then discover() end
+    elseif event == "COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED" then
+        if arg2 then discover(arg1, arg2) end
     elseif event == "PLAYER_ENTERING_WORLD" then
+        T.view("verify")
         local p = P.active()
         if p and not enteredWorld then
             enteredWorld = true
@@ -2014,6 +2263,7 @@ events:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "PLAYER_REGEN_ENABLED" then
         if autoAfterCombat then autoAfterCombat = false; queueAutoFill("resume") end
     elseif BarsmithDB then
+        if event == "LEARNED_SPELL_IN_SKILL_LINE" or event == "LEARNED_SPELL_IN_TAB" then T.learned(arg1) end
         queueAutoFill(event == "BAG_UPDATE_DELAYED" and "item" or "spell", event == "LEARNED_SPELL_IN_SKILL_LINE" and arg1)
     end
 end)

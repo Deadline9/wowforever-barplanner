@@ -698,6 +698,10 @@ Inspect the Export setup rather than guessing which slots/pages are actually use
 
 Bar 1 controls the shared ACTIONBUTTON keys across humanoid, Cat, Bear and other paged bars. Excluding one form page protects its slots. A shared key change on an enabled Bar 1 is felt across forms. Keep exported exact spell IDs when the client distinguishes form-specific actions. A physical page number alone cannot tell you which variant was placed there.
 
+For a transforming ability, keep the exact `spell:ID` from Export setup when it identifies the intended physical action. The same ID can legitimately appear on two form pages. Keep different exported IDs when the character has separately learned variants. Preserve explicit ranks.
+
+A fresh installation may recognize only the variant currently displayed. Barsmith learns verified relationships as the character visits each form or stance, including with Auto-fill off. Check the named plan, visit the relevant states, then Check again in the intended form. Each character learns its own relationships. A talent or client change can require another observation. If Check still reports ambiguity, use a verified export or leave that placement pending. A shared name stem or page label supplies insufficient evidence for choosing an ID.
+
 Only explicit `SLOT` records authorize placement on a form page. If a bar addon needs a copy on a different physical page, establish its actual destination before adding that record. Check lists occupied destinations and future replacements. The profile can prompt once for a leveling batch or automatically replace occupied managed slots when its overwrite option is enabled.
 
 ---
