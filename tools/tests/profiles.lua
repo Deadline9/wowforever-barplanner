@@ -993,5 +993,243 @@ test("book order cannot choose between two named form variants", function()
     end)
 end)
 
+local combatSlots = { 79, 97, 104 }
+local combatNames = { "Seren Shred", "Seren Swipe", "Seren Maul" }
+local function combatPlan()
+    local macros, slots = {}, {}
+    for i, name in ipairs(combatNames) do
+        local spellName = name:sub(7)
+        macros[i] = { name = name, icon = 134400, perChar = true,
+            body = "#showtooltip " .. spellName .. "\n/startattack [harm,nodead]\n/cast " .. spellName }
+        slots[i] = { slot = combatSlots[i], kind = "macro", value = name }
+    end
+    return BP.serialize({ class = "DRUID", slots = slots, macros = macros })
+end
+
+local function seedSurvivors()
+    for i = 1, 7 do CreateMacro("Keep " .. i, 42, "/dance", true) end
+    char().slots[55] = { "macro", "Keep 7" }
+end
+
+local function loseCombatMacros()
+    for i, name in ipairs(combatNames) do
+        w.macros[name] = nil
+        char().slots[combatSlots[i]] = { "macro" } -- ID zero and no label
+    end
+end
+
+test("audit distinguishes verified batch from post-reload loss; repair preserves the manual recreation", function()
+    seedSurvivors()
+    local text = combatPlan()
+    apply(text)
+    assert(select(2, GetNumMacros()) == 10)
+    loseCombatMacros()
+    reload(); event("PLAYER_ENTERING_WORLD")
+    has(w.chat, "After UI load: macro state differs")
+    for i, name in ipairs(combatNames) do
+        has(w.chat, name .. ": definition missing")
+        has(w.chat, "Slot " .. combatSlots[i] .. " / macro " .. name)
+        assert(GetMacroIndexByName(name) == 0)
+    end
+    local m = BP.parse(text).macros[1]
+    CreateMacro(m.name, 134400, m.body, true)
+    local manual = w.macros[m.name]
+    local writes = 0
+    local create = CreateMacro
+    withAPI({ CreateMacro = function(...)
+        writes = writes + 1
+        return create(...)
+    end, EditMacro = function() error("unexpected edit") end }, function()
+        local summary, _, details = BP.run(text, true)
+        has(summary, "Check OK")
+        for i, name in ipairs(combatNames) do has(details, "[" .. combatSlots[i] .. "]: verify and repair " .. name) end
+        assert(select(2, GetNumMacros()) == 8 and writes == 0 and HasAction(79) and not GetActionText(79))
+        has(BP.run(text, false), "Done:")
+        assert(writes == 2 and w.macros[m.name] == manual)
+        reload(); event("PLAYER_ENTERING_WORLD")
+        has(w.chat, "verified 2 newly created macro(s) and 2 assigned slot(s)")
+        for i, name in ipairs(combatNames) do assert(idAt(combatSlots[i]) == name) end
+        assert(select(2, GetNumMacros()) == 10 and w.saves == 0 and w.keys.NUMLOCK == "RUN")
+        revert()
+        assert(select(2, GetNumMacros()) == 8 and w.macros[m.name] == manual)
+        for _, slot in ipairs(combatSlots) do assert(not HasAction(slot)) end
+        assert(idAt(55) == "Keep 7" and w.keys.R == "RUN")
+    end)
+end)
+
+test("a temporary label failure with ID zero returns the actual macro before writing the bank", function()
+    seedSurvivors()
+    local text = combatPlan()
+    apply(text)
+    char().slots[79] = { "macro", "Keep 7" }
+    local action, getText = GetActionInfo, GetActionText
+    withAPI({
+        GetActionInfo = function(s)
+            if s == 79 and HasAction(s) then return "macro", 0 end
+            return action(s)
+        end,
+        GetActionText = function(s) if s ~= 79 then return getText(s) end end,
+    }, function()
+        has(BP.run(text, true), "Check OK")
+        has(BP.run(text, false), "yielded a recoverable macro")
+        assert(idAt(79) == "Keep 7" and not GetCursorInfo() and select(2, GetNumMacros()) == 10)
+    end)
+end)
+
+test("a broken-looking slot never authorizes an arbitrary plan, clear, or Auto-fill replacement", function()
+    seedSurvivors()
+    local text = combatPlan()
+    apply(text); loseCombatMacros()
+    local wrong = plan("SLOT\t79\tclear\t\nENSURE\tR\tBUTTON")
+    has(BP.run(wrong, true), "no macro label")
+    assert(not pcall(BP.exportCurrent))
+    event()
+    assert(HasAction(79) and w.keys.R == "RUN" and GetMacroIndexByName(combatNames[1]) == 0)
+    assert(P.manage("create", "Other", text))
+    has(BP.run(text, true), "no macro label")
+end)
+
+test("positive action ID, spell subtype, incomplete bank and inconsistent name lookup block repairs", function()
+    seedSurvivors()
+    local text = combatPlan()
+    apply(text); loseCombatMacros()
+    local action, getInfo, index = GetActionInfo, GetMacroInfo, GetMacroIndexByName
+    for _, tuple in ipairs({ {15}, {0, "spell"}, {0, "item"} }) do
+        withAPI({ GetActionInfo = function(s)
+            if s == 79 then return "macro", tuple[1], tuple[2] end
+            return action(s)
+        end }, function() has(BP.run(text, true), "no macro label") end)
+    end
+    withAPI({ GetMacroInfo = function(i) if i ~= 122 then return getInfo(i) end end },
+        function() has(BP.run(text, true), "Macro bank is incomplete") end)
+    withAPI({ GetMacroIndexByName = function(n) return n == combatNames[1] and 126 or index(n) end },
+        function() has(BP.run(text, true), "lookup disagrees") end)
+    withAPI({ C_ActionBar = { IsMacroActionWithShowTooltip = function() return true end } },
+        function() has(BP.run(text, true), "no macro label") end)
+    assert(HasAction(79) and select(2, GetNumMacros()) == 7)
+end)
+
+test("an inconclusive pickup leaves the slot untouched and history unpublished", function()
+    seedSurvivors()
+    local text = combatPlan()
+    apply(text); loseCombatMacros()
+    local snapshot = P.active().undo
+    withAPI({ PickupAction = function() end }, function()
+        has(BP.run(text, true), "Check OK")
+        has(BP.run(text, false), "Cannot confirm a dangling macro on slot 79")
+        assert(HasAction(79) and not GetCursorInfo() and P.active().undo == snapshot and select(2, GetNumMacros()) == 7)
+    end)
+end)
+
+test("a candidate that resolves between Check and Apply requires fresh review", function()
+    seedSurvivors()
+    local text = combatPlan()
+    apply(text); loseCombatMacros()
+    has(BP.run(text, true), "Check OK")
+    char().slots[79] = { "macro", "Keep 7" }
+    has(BP.run(text, false), "Run Check again")
+    assert(idAt(79) == "Keep 7" and select(2, GetNumMacros()) == 7)
+end)
+
+test("late eviction of an earlier created macro fails final verification and recovers the original layout", function()
+    seedSurvivors()
+    spell(79, 5)
+    local place = PlaceAction
+    withAPI({ PlaceAction = function(s)
+        place(s)
+        if s == 104 then
+            w.macros[combatNames[1]] = nil
+            char().slots[79] = { "macro" }
+        end
+    end }, function()
+        local text = combatPlan()
+        has(BP.run(text, true), "Check OK")
+        local summary, _, details = BP.run(text, false)
+        has(summary, "Final macro verification failed")
+        has(summary, "Previous state restored")
+        has(details, "Macro Seren Shred: definition missing")
+        has(details, "Slot 79 / macro Seren Shred")
+        assert(idAt(79) == 5 and not idAt(97) and not idAt(104) and idAt(55) == "Keep 7")
+        assert(select(2, GetNumMacros()) == 7 and not P.active().lastApplied)
+    end)
+end)
+
+test("late reindexing that moves a previously correct slot to a different valid macro is reported", function()
+    seedSurvivors()
+    local text = plan("MACRO\tNew\t42\t1\t/dance\nSLOT\t55\tmacro\tKeep 7\nSLOT\t79\tmacro\tNew\nENSURE\tB\tBUTTON")
+    local place = PlaceAction
+    withAPI({ PlaceAction = function(s)
+        place(s)
+        if s == 79 then char().slots[55] = { "macro", "Keep 2" } end
+    end }, function()
+        has(BP.run(text, true), "Check OK")
+        local summary, _, details = BP.run(text, false)
+        has(summary, "Final macro verification failed")
+        has(summary, "Recovery incomplete")
+        has(details, 'Slot 55 / macro Keep 7 / name: "Keep 7" -> "Keep 2"')
+        assert(idAt(55) == "Keep 2" and w.keys.B == "PACK" and not w.macros.New and not P.active().text)
+    end)
+end)
+
+test("a zero action ID with a readable label still names a real macro", function()
+    seedSurvivors()
+    local text = combatPlan()
+    apply(text)
+    local action = GetActionInfo
+    withAPI({ GetActionInfo = function(s)
+        if s == 79 then return "macro", 0 end
+        return action(s)
+    end, C_ActionBar = { GetActionText = function() end } }, function()
+        -- The legacy label identifies the real action while the other label
+        -- API temporarily returns nil. No candidate or cursor probe is needed.
+        apply(text)
+        assert(idAt(79) == combatNames[1])
+    end)
+end)
+
+test("rollback after a failed repair restores bindings and never deletes a manually recreated macro", function()
+    seedSurvivors()
+    local base = BP.parse(combatPlan())
+    base.binds = {{ op = "ENSURE", key = "R", command = "BUTTON" }}
+    local text = BP.serialize(base)
+    apply(text); loseCombatMacros()
+    local m = base.macros[1]
+    CreateMacro(m.name, tonumber(m.icon), m.body, true)
+    local snapshot, manual = P.active().undo, w.macros[m.name]
+    w.keys.R, w.rejectSlot = "RUN", 104
+    has(BP.run(text, true), "Check OK")
+    local summary = BP.run(text, false)
+    has(summary, "Cleared invalid reference(s) on slot(s) 79, 97, 104")
+    assert(w.keys.R == "RUN" and w.keys.NUMLOCK == "RUN" and w.macros[m.name] == manual)
+    assert(select(2, GetNumMacros()) == 8 and P.active().undo == snapshot and idAt(55) == "Keep 7")
+    for _, slot in ipairs(combatSlots) do assert(not HasAction(slot)) end
+end)
+
+test("a bank lookup corroborates the stored spelling of a uniquely matched macro", function()
+    CreateMacro("Mixed Case", 42, "/dance", true)
+    local old = w.macros["Mixed Case"]
+    apply(plan("MACRO\tmixed case\t42\t1\t/dance\nSLOT\t79\tmacro\tmixed case"))
+    assert(w.macros["Mixed Case"] == old and idAt(79) == "Mixed Case" and select(2, GetNumMacros()) == 1)
+end)
+
+test("an unrelated blank-name macro prevents a repair probe but allows normal named writes", function()
+    seedSurvivors()
+    CreateMacro("", 42, "/wave", true)
+    local text = combatPlan()
+    apply(text); loseCombatMacros()
+    has(BP.run(text, true), "unnamed stored macro")
+    assert(HasAction(79) and w.macros[""].body == "/wave")
+end)
+
+test("excluded dangling slots remain untouched during a reapply", function()
+    seedSurvivors()
+    local text = combatPlan()
+    apply(text); loseCombatMacros()
+    P.setBarManaged(P.active(), 97, false)
+    apply(text)
+    assert(idAt(79) == combatNames[1] and HasAction(97) and not GetActionText(97))
+    assert(HasAction(104) and not GetActionText(104) and idAt(55) == "Keep 7")
+end)
+
 print(passed .. " passed, " .. failed .. " failed")
 assert(failed == 0)

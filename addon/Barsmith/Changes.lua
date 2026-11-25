@@ -59,23 +59,28 @@ function C.checkDifferences(lines, message)
     if #lines > 0 then error({ message = message, details = lines }, 0) end
 end
 
-local function macroIndex(name)
+local function macroIndex(name, requireComplete, rejectUnnamed)
     local account, character = GetNumMacros()
     local max = MAX_ACCOUNT_MACROS or 120
-    local found
+    local found, canonical
     for i = 1, account + character do
         local index = i <= account and i or max + i - account
         local n = GetMacroInfo(index)
+        if requireComplete then assert(type(n) == "string", "Macro bank is incomplete at index " .. index .. ".") end
+        if rejectUnnamed then assert(n:match("%S"), "An unnamed stored macro prevents identifying the broken reference.") end
         if n and n:lower() == name:lower() then
             assert(not found, "Ambiguous macro name: " .. name)
-            found = index
+            found, canonical = index, n
         end
+    end
+    if requireComplete then
+        assert(GetMacroIndexByName(canonical or name) == (found or 0), "Macro name lookup disagrees with the bank for " .. name)
     end
     return found
 end
 
-function C.macro(name)
-    local i = macroIndex(name)
+function C.macro(name, requireComplete)
+    local i = macroIndex(name, requireComplete)
     if not i then return false end
     local n, icon, body = GetMacroInfo(i)
     if C_Macro and C_Macro.GetSelectedMacroIcon then
@@ -85,26 +90,43 @@ function C.macro(name)
     return { name = n, icon = icon, body = body, perChar = i > (MAX_ACCOUNT_MACROS or 120) }
 end
 
+function C.pickupMacro(action)
+    local index = macroIndex(action.name, true)
+    assert(index and (index > (MAX_ACCOUNT_MACROS or 120)) == action.perChar, "Macro unavailable: " .. action.name)
+    PickupMacro(index)
+end
+
 -- GetActionInfo can describe a macro's item or spell instead of returning its
 -- macro index. Read the slot's own label, then require one match across both
 -- macro lists. The matching macro record supplies its account/character scope.
-function C.slotMacro(slot)
+function C.slotMacro(slot, repair, id, subtype)
     local getText = C_ActionBar and C_ActionBar.GetActionText or GetActionText
     local name = getText and getText(slot)
+    if (not name or name == "") and GetActionText and GetActionText ~= getText then name = GetActionText(slot) end
+    if repair and getText and (name == nil or name == "") and id == 0 and (not subtype or subtype == "" or subtype == "macro")
+        and not (C_ActionBar and C_ActionBar.IsMacroActionWithShowTooltip and C_ActionBar.IsMacroActionWithShowTooltip(slot)) then
+        local account, character = GetNumMacros()
+        assert(account + character > 0, "Cannot confirm a broken reference against an empty macro bank.")
+        local index = macroIndex(repair.name, true, true)
+        if not index or (index > (MAX_ACCOUNT_MACROS or 120)) == repair.perChar then
+            return nil -- candidate only; Apply must inspect what the slot actually holds
+        end
+    end
     assert(name and name ~= "", "Cannot identify macro on slot " .. slot .. ": no macro label.")
     local macro = C.macro(name)
     assert(macro, "Cannot identify macro on slot " .. slot .. ": no stored macro named " .. name)
     return macro
 end
 
-function C.slot(slot, book)
+function C.slot(slot, book, repair)
     local kind, id, subtype = GetActionInfo(slot)
     if not kind then
         assert(not HasAction(slot), "Unknown action on slot " .. slot)
         return { kind = "empty" }
     end
     if kind == "macro" then
-        local macro = C.slotMacro(slot)
+        local macro = C.slotMacro(slot, repair, id, subtype)
+        if not macro then return { kind = "unresolvedMacro", name = repair.name, perChar = repair.perChar } end
         return { kind = kind, name = macro.name, perChar = macro.perChar }
     end
     if kind == "spell" then id = C.slotSpellID(slot, id, book) end
@@ -112,7 +134,7 @@ function C.slot(slot, book)
 end
 
 function C.read(op, book)
-    if op.slot then return C.slot(op.slot, book) end
+    if op.slot then return C.slot(op.slot, book, op.before and op.before.kind == "unresolvedMacro" and op.before) end
     return C.macro(op.name)
 end
 
@@ -181,7 +203,7 @@ function C.reverseBindings(u, protected)
 end
 
 local function putMacro(name, value)
-    local idx = macroIndex(name)
+    local idx = macroIndex(name, true)
     if not value then
         assert(idx, "Missing macro: " .. name)
         return DeleteMacro(idx)
@@ -210,7 +232,8 @@ local function write(op, value, pickup, receipt, book)
         end
         assert(kind == value.kind and spellOK
             and (kind ~= "item" or id == value.id)
-            and (kind ~= "macro" or GetMacroInfo(id) == value.name), "Pickup failed for slot " .. op.slot)
+            and (kind ~= "macro" or (id and id > 0 and GetMacroInfo(id) == value.name
+                and (id > (MAX_ACCOUNT_MACROS or 120)) == value.perChar)), "Pickup failed for slot " .. op.slot)
         PlaceAction(op.slot)
         ClearCursor()
     end
@@ -229,9 +252,48 @@ local function write(op, value, pickup, receipt, book)
     assert(C.equal(actual, value), "Game did not restore/place " .. (op.name or ("slot " .. op.slot)))
 end
 
+-- The bank and label checks cannot prove what an unlabelled slot contains.
+-- Probe with an empty cursor BEFORE creating macros (which may reorder the
+-- bank). Return any recoverable action immediately. A dead reference can
+-- only be restored to an empty usable slot, which Check discloses.
+local function prepareRepair(op)
+    assert(C.equal(C.read(op), op.before), "Macro reference changed on slot " .. op.slot .. ". Run Check again.")
+    assert(not GetCursorInfo(), "Empty the cursor before repairing slot " .. op.slot)
+    PickupAction(op.slot)
+    local kind, id = GetCursorInfo()
+    local empty = not GetActionInfo(op.slot) and not HasAction(op.slot)
+    if kind and not (kind == "macro" and id == 0) then
+        if empty then PlaceAction(op.slot) end
+        assert(not GetCursorInfo() and HasAction(op.slot),
+            "Slot " .. op.slot .. " yielded an action. Could not verify its return; inspect the cursor and slot.")
+        error("Slot " .. op.slot .. " yielded a recoverable " .. kind .. ". Returned it and stopped repair.")
+    end
+    if kind then ClearCursor() end
+    assert(empty, "Cannot confirm a dangling macro on slot " .. op.slot .. "; the slot still reports an action.")
+    op.before = { kind = "empty" }
+end
+
+-- Compare the whole approved macro batch after the last write. Lookups are
+-- by current name and scope, so later creations may freely renumber indexes.
+function C.verifyMacros(checks, field)
+    field = field or "after"
+    local differences = {}
+    for _, check in ipairs(checks or {}) do
+        local where = check.slot and ("Slot " .. check.slot .. " / macro " .. check.after.name) or ("Macro " .. check.name)
+        local expected = check[field]
+        local ok, actual
+        if check.slot then ok, actual = pcall(C.slot, check.slot, nil, expected.kind == "unresolvedMacro" and expected)
+        else ok, actual = pcall(C.macro, check.name, true) end
+        if not ok then table.insert(differences, where .. ": " .. tostring(actual))
+        elseif actual == false and expected then table.insert(differences, where .. ": definition missing from the macro bank.")
+        else C.differences(differences, where, expected, actual) end
+    end
+    return differences
+end
+
 -- Both Apply and confirmed Revert enter here after a read-only preflight.
 -- Reverse completed operations if a later game call rejects the batch.
-function C.execute(ops, plan, preview, pickups)
+function C.execute(ops, plan, preview, pickups, macroChecks)
     local book = #ops > 0 and C_ActionBar and C_ActionBar.FindSpellActionButtons and C.spellbookEntries()
     local undo = C.bindingUndo(preview)
     if preview then
@@ -242,7 +304,14 @@ function C.execute(ops, plan, preview, pickups)
         end
     end
     local attempted, failedWrite = 0, nil
+    local repairs, created = {}, {}
     local ok, err = pcall(function()
+        for _, op in ipairs(ops) do
+            if op.slot and op.before.kind == "unresolvedMacro" then
+                prepareRepair(op)
+                table.insert(repairs, tostring(op.slot))
+            end
+        end
         for i, op in ipairs(ops) do
             local actual = C.read(op, book)
             local where = op.name or ("slot " .. op.slot)
@@ -255,15 +324,26 @@ function C.execute(ops, plan, preview, pickups)
             failedWrite = {}
             write(op, op.after, pickups and pickups[i], failedWrite, book)
             failedWrite = nil
+            if op.name and not op.before then created[op.name] = true end
         end
+        C.checkDifferences(C.verifyMacros(macroChecks), "Final macro verification failed.")
     end)
     if ok then return undo end
-    local recovered = true
+    local recovered = not (attempted == 0 and GetCursorInfo and GetCursorInfo())
     if attempted > 0 and ops[attempted].slot then ClearCursor() end
     for i = attempted, 1, -1 do
         local op = ops[i]
         local restored = pcall(function()
-            local live = C.read(op, book)
+            local missing = op.slot and op.after.kind == "macro" and created[op.after.name] and not C.macro(op.after.name, true)
+            local live
+            if missing then
+                live = C.slot(op.slot, book, op.after)
+                if live.kind == "unresolvedMacro" then
+                    prepareRepair({ slot = op.slot, before = live })
+                    write(op, op.before, nil, nil, book)
+                    return
+                end
+            else live = C.read(op, book) end
             if i == attempted and failedWrite and failedWrite.index and op.name and not live then
                 assert(not GetMacroInfo(failedWrite.index), "Unexpected macro name after write")
             end
@@ -275,16 +355,28 @@ function C.execute(ops, plan, preview, pickups)
                     and live.name == op.after.name and (live.perChar == op.after.perChar
                         or (not op.before and failedWrite.index == macroIndex(live.name)))
                 assert(partialMacro or C.equal(live, op.after))
+                if op.name and not op.before then
+                    local used = C.macroInUse(op.name, {})
+                    assert(not used, used)
+                end
                 write(op, op.before, nil, nil, book)
             end
         end)
         recovered = restored and recovered
+        if not restored and GetCursorInfo and GetCursorInfo() then break end
     end
     if undo then
         local restored, result = pcall(function() return B.commit(undo.plan, C.reverseBindings(undo)) end)
         recovered = recovered and restored and result
     end
+    local residual = C.verifyMacros(macroChecks, "before")
+    if #residual > 0 then
+        recovered = false
+        if type(err) ~= "table" then err = { message = tostring(err), details = {} } end
+        for _, difference in ipairs(residual) do table.insert(err.details, "After recovery: " .. difference) end
+    end
     local recovery = recovered and " Previous state restored." or " Recovery incomplete; inspect bars, macros and keys."
+    if #repairs > 0 then recovery = recovery .. " Cleared invalid reference(s) on slot(s) " .. table.concat(repairs, ", ") .. "." end
     if type(err) == "table" then
         err.message = err.message .. recovery
         error(err, 0)

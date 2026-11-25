@@ -510,13 +510,14 @@ function C.pickup(action)
     elseif action.kind == "macro" then
         local macro = C.macro(action.name)
         if macro and macro.perChar == action.perChar then
-            return function() PickupMacro(GetMacroIndexByName(action.name)) end
+            return function() C.pickupMacro(action) end
         end
     end
 end
 
 local function label(action)
     if action.kind == "empty" then return "empty" end
+    if action.kind == "unresolvedMacro" then return "unlabelled macro reference (ID 0)" end
     if action.kind == "macro" then return "macro " .. action.name end
     local name
     if action.kind == "spell" then name = getSpellName(action.id)
@@ -603,20 +604,20 @@ local function excludedMacroUses(profile, name)
     return uses
 end
 
-local function reviewPlan(plan, preview, profile)
+local function reviewPlan(plan, preview, profile, reapplying)
     local r = {
         binding = preview, bound = preview and #preview.changes or 0, bindsSame = preview and preview.same or 0,
         placed = 0, same = 0, cleared = 0, macrosNew = 0, macrosChanged = 0, macrosSame = 0,
         notLearned = {}, notInBags = {}, skipped = {}, problems = {}, slotDetails = {}, slotChanges = {},
-        ops = {}, pending = {}, inspected = {}, overwrites = 0, futureOverwrites = 0,
+        ops = {}, macroChecks = {}, pending = {}, inspected = {}, overwrites = 0, futureOverwrites = 0,
     }
-    local pickups, macros = {}, {}
+    local pickups, macros, repairTargets = {}, {}, {}
     local account, character = GetNumMacros()
     for _, m in ipairs(plan.macros) do
         local name = macroName(m.name)
         local key = name:lower()
         assert(not macros[key], "Duplicate macro: " .. name)
-        local before = C.macro(name)
+        local before = C.macro(name, true)
         local body = cutBytes(m.body, MACRO_BODY_MAX)
         if body ~= m.body then table.insert(r.problems, "Macro " .. name .. " will be shortened to 255 bytes.") end
         local requestedIcon = macroIcon(m.icon)
@@ -631,8 +632,13 @@ local function reviewPlan(plan, preview, profile)
         local checkIcon = requestedIcon and (requestedIcon ~= DEFAULT_ICON or (C_Macro and C_Macro.GetSelectedMacroIcon))
         if before and trim(before.body) == trim(body) and (not checkIcon or before.icon == requestedIcon) then
             r.macrosSame = r.macrosSame + 1
+            table.insert(r.macroChecks, { name = name, before = before, after = before })
+            if before.perChar == m.perChar then repairTargets[key] = before end
         else
-            table.insert(r.ops, { name = name, before = before, after = after })
+            local op = { name = name, before = before, after = after }
+            table.insert(r.ops, op)
+            table.insert(r.macroChecks, op)
+            if not before then repairTargets[key] = after end
             if before then
                 local uses = excludedMacroUses(profile, name)
                 r.inspected["Macro " .. name].excludedSlots = uses
@@ -663,7 +669,8 @@ local function reviewPlan(plan, preview, profile)
         end
     end
     for _, s in ipairs(slots) do
-        local before = C.slot(s.slot, book)
+        local repair = reapplying and s.kind == "macro" and repairTargets[macroName(s.value):lower()]
+        local before = C.slot(s.slot, book, repair)
         local after, pickup, why
         if s.kind == "clear" then
             after = { kind = "empty" }
@@ -709,11 +716,18 @@ local function reviewPlan(plan, preview, profile)
             end
         end
         if after then
+            if before.kind == "unresolvedMacro" then
+                description = "repair reference to " .. after.name
+                table.insert(r.problems, slotWhere(s.slot) .. ": verify and repair " .. after.name
+                    .. ". A recoverable action stops repair. Revert leaves a confirmed broken reference empty.")
+            end
+            local op = { slot = s.slot, before = before, after = after, previousMacro = oldMacro, placedMacro = nextMacro }
+            if after.kind == "macro" then table.insert(r.macroChecks, op) end
             if C.equal(before, after) then
                 same, description = true, description or "already correct"
                 r.same = r.same + 1
             else
-                table.insert(r.ops, { slot = s.slot, before = before, after = after, previousMacro = oldMacro, placedMacro = nextMacro })
+                table.insert(r.ops, op)
                 pickups[#r.ops] = pickup
                 if before.kind ~= "empty" then r.overwrites = r.overwrites + 1 end
                 if after.kind == "empty" then r.cleared = r.cleared + 1 else r.placed = r.placed + 1 end
@@ -789,6 +803,11 @@ local function reportLines(r, dry)
     if dry then
         full[#full + 1] = ("Slots: %d to fill, %d to clear, %d already right. Macros: %d new, %d changed, %d unchanged.")
             :format(r.placed, r.cleared, r.same, r.macrosNew, r.macrosChanged, r.macrosSame)
+    end
+    if not dry and #r.macroChecks > 0 then
+        local definitions = r.macrosSame + r.macrosNew + r.macrosChanged
+        change(("Final verification passed for %s and %s."):format(countLabel(definitions, "macro definition"),
+            countLabel(#r.macroChecks - definitions, "macro slot")))
     end
     for _, op in ipairs(r.ops) do
         if op.name then
@@ -1012,7 +1031,7 @@ function BP.run(text, dry)
             preview = B.preview(plan, B.capture(plan.binds), protectedCommands(profile))
             preview.legacy = plan.version == 1
         end
-        local r, pickups = reviewPlan(plan, preview, profile)
+        local r, pickups = reviewPlan(plan, preview, profile, profile.pending and profile.text == trim(text))
         local state = profileState(profile)
         if not dry then
             local changes = {}
@@ -1021,7 +1040,7 @@ function BP.run(text, dry)
             C.checkDifferences(changes, "Reviewed state changed. Run Check again.")
         end
         for _, op in ipairs(r.ops) do
-            if op.slot then requireRestorable(op.slot, op.before) end
+            if op.slot and op.before.kind ~= "unresolvedMacro" then requireRestorable(op.slot, op.before) end
         end
         if dry then
             if not preview or #preview.errors == 0 then
@@ -1030,7 +1049,8 @@ function BP.run(text, dry)
         else
             local snapshot = { before = state, ops = r.ops, text = trim(text), visit = BarsmithDB.characterVisit,
                 selectedIcons = C_Macro and C_Macro.GetSelectedMacroIcon ~= nil or false }
-            snapshot.bindings = C.execute(r.ops, plan, preview, pickups)
+            snapshot.bindings = C.execute(r.ops, plan, preview, pickups, r.macroChecks)
+            snapshot.verifyCreatedOnLoad = r.macrosNew > 0 or nil
             profile.text, profile.pending = snapshot.text, r.pending
             if #r.ops > 0 or snapshot.bindings or not C.equal(state, profileState(profile)) then
                 profile.undo = snapshot
@@ -1058,7 +1078,7 @@ local function showReview(kind, title, lines, ticket)
     return showStatus({ title }, lines, { title }, lines)
 end
 
-local function macroInUse(name, ops)
+function C.macroInUse(name, ops)
     local changing = {}
     for _, op in ipairs(ops) do
         if op.slot then changing[op.slot] = true end
@@ -1129,7 +1149,7 @@ local function revertPlan(profile)
             if not op.before then
                 assert(op.after.perChar or u.visit == BarsmithDB.characterVisit,
                     "Cannot verify other characters' uses of new account macro " .. op.name .. " after switching characters.")
-                local used = macroInUse(op.name, included)
+                local used = C.macroInUse(op.name, included)
                 assert(not used, used)
                 -- A new key bound directly to this macro would lose its action.
                 local cmd = "MACRO " .. op.name
@@ -1708,11 +1728,42 @@ P.onChange = function()
     end
 end
 
+-- A final in-memory read cannot establish persistence across /reload. On
+-- the next UI load, compare just the creations in the active undo record.
+-- This observation has no placement, binding, creation or deletion path.
+local enteredWorld, auditSnapshot
+local function auditCreated(snapshot)
+    local checks, names, count = {}, {}, 0
+    for _, op in ipairs(snapshot.ops) do
+        if op.name and not op.before then
+            names[op.after.name] = true
+            table.insert(checks, op)
+            count = count + 1
+        end
+    end
+    for _, op in ipairs(snapshot.ops) do
+        if op.slot and op.after.kind == "macro" and names[op.after.name] then table.insert(checks, op) end
+    end
+    local changes = C.verifyMacros(checks)
+    if #changes == 0 then
+        say(("After UI load: verified %d newly created macro(s) and %d assigned slot(s) from Apply."):format(count, #checks - count))
+    else
+        say("After UI load: macro state differs from the final Apply verification.")
+        for _, msg in ipairs(changes) do say(msg) end
+    end
+    snapshot.verifyCreatedOnLoad = nil
+end
+
 queueAutoFill = function()
     if autoQueued then return end
     autoQueued = true
     C_Timer.After(1, function()
         autoQueued = false
+        if auditSnapshot then
+            local p = P.active()
+            if p and p.undo == auditSnapshot then auditCreated(auditSnapshot) end
+            auditSnapshot = nil
+        end
         if InCombatLockdown() then autoAfterCombat = true; return end
         if GetCursorInfo() then autoAfterCursor = true; return end
         autoAfterCursor = false
@@ -1733,7 +1784,11 @@ events:SetScript("OnEvent", function(_, event, arg1)
             P.init()
         end
     elseif event == "PLAYER_ENTERING_WORLD" then
-        P.character()
+        local p = P.active()
+        if p and not enteredWorld then
+            enteredWorld = true
+            if p.undo and p.undo.verifyCreatedOnLoad then auditSnapshot = p.undo end
+        end
         queueAutoFill()
     elseif event == "CURSOR_CHANGED" then
         if autoAfterCursor and not GetCursorInfo() then queueAutoFill() end
