@@ -1537,5 +1537,25 @@ test("inconclusive physical membership cannot export or overwrite a transient di
     end)
 end)
 
+test("oscillating target IDs each fail once and a confirmed relearn can retry the same ID", function()
+    local id, calls, learned = 81, 0, false
+    withAPI({
+        C_Spell = { GetSpellIDForSpellIdentifier = function() return id end,
+            PickupSpell = function() calls = calls + 1 end },
+        IsSpellKnown = function(spellID) return learned and id == spellID end,
+    }, function()
+        apply(plan("SLOT\t81\tspell\tTechnique"))
+        learned = true
+        for _, target in ipairs({ 81, 82, 81, 82, 81 }) do id = target; event() end
+        assert(calls == 2)
+        learned = false; event()
+        learned = true; event()
+        assert(calls == 2)
+        w.event("LEARNED_SPELL_IN_SKILL_LINE", 81); event("BAG_UPDATE_DELAYED")
+        w.event("LEARNED_SPELL_IN_SKILL_LINE", 81); event()
+        assert(calls == 3 and not idAt(81) and P.active().pending[81])
+    end)
+end)
+
 print(passed .. " passed, " .. failed .. " failed")
 assert(failed == 0)

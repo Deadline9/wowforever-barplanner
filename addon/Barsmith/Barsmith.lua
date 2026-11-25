@@ -1722,7 +1722,18 @@ local function levelBatch(profile, topics)
         local before = C.slot(s.slot, book)
         if not pending and before.kind ~= "empty" and before.kind ~= s.kind then return end
         local target = available(s, book)
-        if not target then return end
+        local failure = topics and autoFailures[s.slot]
+        if not target then
+            if failure and s.kind == "spell" then
+                for id in pairs(failure.targets) do
+                    if not independentlyKnown(id) then failure.unavailable[id] = true end
+                end
+            end
+            return
+        end
+        if failure and topics.learned and topics.learned[target.id] and failure.unavailable[target.id] then
+            failure.targets[target.id], failure.unavailable[target.id] = nil, nil
+        end
         if before.kind == s.kind and before.id == target.id then return nil, nil, target.id end
         if not pending and (before.kind ~= "empty" or (topics and fulfilled[s.slot] == target.id)) then return end
         if before.kind == "empty" and s.kind == "spell" and slotContainsSpell(s.slot, target.id) then
@@ -1778,14 +1789,18 @@ end
 local function autoPlace(profile, ops, pickups)
     local count = 0
     for _, op in ipairs(ops) do
-        local attempt = { before = op.before, id = op.after.id, previousMacro = op.previousMacro }
-        if not C.equal(autoFailures[op.slot], attempt) then
+        local failure = autoFailures[op.slot]
+        if not failure or not C.equal(failure.before, op.before) or not C.equal(failure.previousMacro, op.previousMacro) then
+            failure = { before = op.before, previousMacro = op.previousMacro, targets = {}, unavailable = {} }
+        end
+        if not failure.targets[op.after.id] then
             local ok, err = pcall(placeBatch, profile, { op }, pickups)
             if ok then
                 autoFailures[op.slot] = nil
                 count = count + 1
             else
-                autoFailures[op.slot] = attempt
+                failure.targets[op.after.id] = true
+                autoFailures[op.slot] = failure
                 local message = type(err) == "table" and err.message or tostring(err)
                 local reason = profile.pending[op.slot] and "pending" or "empty"
                 say(("Auto-fill paused for %s [%d] (%s): %s"):format(slotLabel(op.slot), op.slot, reason, message))
@@ -1943,9 +1958,13 @@ local function auditCreated(snapshot)
 end
 
 local queuedTopics = {}
-queueAutoFill = function(topic)
-    if not topic then queuedTopics = { spell = true, item = true, full = true }
+queueAutoFill = function(topic, learnedID)
+    if not topic then queuedTopics.spell, queuedTopics.item, queuedTopics.full = true, true, true
     elseif topic ~= "resume" then queuedTopics[topic] = true end
+    if type(learnedID) == "number" then
+        queuedTopics.learned = queuedTopics.learned or {}
+        queuedTopics.learned[learnedID] = true
+    end
     if autoQueued then return end
     autoQueued = true
     C_Timer.After(1, function()
@@ -1995,7 +2014,7 @@ events:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "PLAYER_REGEN_ENABLED" then
         if autoAfterCombat then autoAfterCombat = false; queueAutoFill("resume") end
     elseif BarsmithDB then
-        queueAutoFill(event == "BAG_UPDATE_DELAYED" and "item" or "spell")
+        queueAutoFill(event == "BAG_UPDATE_DELAYED" and "item" or "spell", event == "LEARNED_SPELL_IN_SKILL_LINE" and arg1)
     end
 end)
 
