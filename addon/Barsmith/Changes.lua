@@ -344,7 +344,10 @@ end
 -- Both Apply and confirmed Revert enter here after a read-only preflight.
 -- Reverse completed operations if a later game call rejects the batch.
 function C.execute(ops, plan, preview, pickups, macroChecks)
-    local book = #ops > 0 and C_ActionBar and C_ActionBar.FindSpellActionButtons and C.spellbookEntries()
+    local book
+    for _, op in ipairs(ops) do
+        if op.slot and (op.before.kind == "spell" or op.after.kind == "spell") then book = C.spellbookEntries(); break end
+    end
     local undo = C.bindingUndo(preview)
     if preview then
         local ok, err, after = B.commit(plan, preview)

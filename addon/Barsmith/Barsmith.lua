@@ -432,19 +432,29 @@ local function slotContainsSpell(slot, id)
 end
 
 function BP.changes.slotSpellID(slot, reported, book)
-    if not (C_ActionBar and C_ActionBar.FindSpellActionButtons) then return reported end
-    local verified
+    local verified, competing
     local function locate(base)
         if not base or base <= 0 or base == reported or base == verified then return end
+        competing = base
         if slotContainsSpell(slot, base) then
             assert(not verified, "Ambiguous base spell on " .. slotLabel(slot) .. " [" .. slot .. "]")
             verified = base
         end
     end
     locate(baseSpell(reported))
-    if C_ActionBar.GetSpell then locate(C_ActionBar.GetSpell(slot)) end
+    if C_ActionBar and C_ActionBar.GetSpell and C_ActionBar.FindSpellActionButtons then
+        local candidate = C_ActionBar.GetSpell(slot)
+        -- GetSpell can also return the effective spell. Reverse lookup is
+        -- documented for base IDs; an override alias is not a second base.
+        if candidate and candidate ~= reported and baseSpell(candidate) ~= reported
+            and overrideSpell(reported) ~= candidate then locate(candidate) end
+    end
     for _, entry in ipairs(book or spellbookEntries()) do
         if entry.overrideID == reported then locate(entry.spellID) end
+    end
+    if competing and not verified and not slotContainsSpell(slot, reported) then
+        error(("Cannot identify the physical spell on %s [%d]: reported %s, possible base %s, no matching slot membership.")
+            :format(slotLabel(slot), slot, tostring(reported), tostring(competing)))
     end
     return verified or reported
 end
@@ -1001,7 +1011,7 @@ function BP.exportCurrent()
     for _, p in ipairs(PAGES) do
         for i = 0, 11 do
             local slot = p.first + i
-            if (not alternate[p.first] or explicit[slot]) and HasAction(slot) then
+            if not alternate[p.first] or explicit[slot] then
                 local kind, id = GetActionInfo(slot)
                 if kind == "spell" then
                     plan.slots[#plan.slots + 1] = { slot = slot, kind = kind, value = exportSpell(C.slotSpellID(slot, id, book), book) }

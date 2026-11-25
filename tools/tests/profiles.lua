@@ -1510,5 +1510,32 @@ test("login seeds verified placements and explicit Auto-fill re-enable retries a
     end)
 end)
 
+test("export keeps the physical base even when the other action API and reverse query expose its alias", function()
+    spell(81, 50)
+    withAPI({
+        HasAction = function() return false end,
+        C_Spell = { GetBaseSpell = function(id) return id == 51 and 50 or id end,
+            GetOverrideSpell = function(id) return id == 50 and 51 or id end },
+        C_ActionBar = { GetSpell = function() return 51 end,
+            FindSpellActionButtons = function(id) return (id == 51 or id == 50) and {81} or {} end },
+    }, function()
+        local exported = BP.parse(BP.exportCurrent())
+        assert(#exported.slots == 1 and exported.slots[1].value == "spell:50")
+    end)
+end)
+
+test("inconclusive physical membership cannot export or overwrite a transient display ID", function()
+    spell(81, 51)
+    withAPI({
+        C_Spell = { GetBaseSpell = function(id) return id == 51 and 50 or id end },
+        C_ActionBar = { FindSpellActionButtons = function() return {} end },
+    }, function()
+        local ok, msg = pcall(BP.exportCurrent)
+        assert(not ok); has({msg}, "reported 51, possible base 50")
+        has(BP.run(plan("SLOT\t81\tspell\tWrath"), true), "Cannot identify the physical spell")
+        assert(idAt(81) == 51 and not w.cursor)
+    end)
+end)
+
 print(passed .. " passed, " .. failed .. " failed")
 assert(failed == 0)
