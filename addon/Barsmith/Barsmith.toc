@@ -9,4 +9,5 @@
 Bindings.lua
 Profiles.lua
 Changes.lua
+Transformations.lua
 Barsmith.lua

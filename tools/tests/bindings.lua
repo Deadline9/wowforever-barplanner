@@ -50,6 +50,7 @@ DEFAULT_CHAT_FRAME = { AddMessage = function(_, line) output[#output+1] = line e
 dofile("addon/Barsmith/Bindings.lua")
 dofile("addon/Barsmith/Profiles.lua")
 dofile("addon/Barsmith/Changes.lua")
+dofile("addon/Barsmith/Transformations.lua")
 dofile("addon/Barsmith/Barsmith.lua")
 local BP = Barsmith
 local function run(records, version)

@@ -87,7 +87,7 @@ SaveBindings = function(set) assert(set == w.scope); w.saves = w.saves + 1 end
 LoadBindings = function() error("Unexpected binding-set change") end
 CreateFrame = function()
     local f = { RegisterEvent = function() end }
-    function f:SetScript(_, fn) w.event = function(event, arg) fn(self, event, arg) end end
+    function f:SetScript(_, fn) w.event = function(event, ...) fn(self, event, ...) end end
     return f
 end
 C_Timer = { After = function(_, fn) w.timer = fn end }
@@ -96,7 +96,7 @@ StaticPopup_Show = function(key, msg) assert(key == "BARSMITH_LEVEL_UPDATES"); t
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, msg) table.insert(w.chat, msg) end }
 local function reload()
     Barsmith = {}
-    for _, file in ipairs({ "Bindings", "Profiles", "Changes", "Barsmith" }) do
+    for _, file in ipairs({ "Bindings", "Profiles", "Changes", "Transformations", "Barsmith" }) do
         dofile("addon/Barsmith/" .. file .. ".lua")
     end
     BP, P = Barsmith, Barsmith.profiles
@@ -1695,6 +1695,234 @@ test("a forward-only legacy book relationship exports the same action after the 
         revert()
         apply(exported)
         assert(idAt(1) == 700)
+    end)
+end)
+
+-- Inactive variants disappear from *all* spell lookups. Their independent
+-- learned base stays in the book. Neither planning nor placement supplies
+-- the association in these tests.
+local function transformWorld(run)
+    local state = { active = {}, rank = 1, talent = 21, build = "100", base = 500, second = false }
+    local names = { [500] = "Step", [510] = "Shift", [501] = "Step (Guard)", [502] = "Step (Assault)" }
+    local function display(id) return state.active[id] or id end
+    local api = {
+        GetBuildInfo = function() return "1.60", state.build end,
+        C_SpecializationInfo = { GetActiveSpecGroup = function() return 1 end,
+            GetCombatConfigIDForSpecGroup = function() return 9 end },
+        C_Traits = {
+            GetConfigInfo = function() if not state.loading then return { treeIDs = {17} } end end,
+            GetTreeNodes = function() return {3} end,
+            GetNodeInfo = function() return {activeRank = state.rank, activeEntry = {entryID = state.talent}} end,
+            GetEntryInfo = function() return {definitionID = 6} end,
+            GetDefinitionInfo = function() return { spellID = state.traitAlias or 500, overriddenSpellID = state.traitBase } end,
+        },
+        Enum = { SpellBookSpellBank = {Player = 0}, SpellBookItemType = {Spell = 1} },
+        C_SpellBook = {
+            GetNumSpellBookSkillLines = function() return 1 end,
+            GetSpellBookSkillLineInfo = function()
+                return {numSpellBookItems = state.noBook and 0 or (state.separate and 3 or state.second and 2 or 1)}
+            end,
+            GetSpellBookItemInfo = function(i)
+                local base = ({state.base, 510, 501})[i]
+                if not base then return end
+                local id = display(base)
+                return {actionID = base, spellID = id, itemType = 1, name = names[id]}
+            end,
+            PickupSpellBookItem = function(i)
+                w.cursor = {"spell", ({state.base, 510, 501})[i]}
+            end,
+        },
+        C_Spell = {
+            GetSpellName = function(id) return names[id] end,
+            GetOverrideSpell = display,
+            GetBaseSpell = function(id)
+                for base, current in pairs(state.active) do if id == current then return base end end
+                return id
+            end,
+            GetSpellIDForSpellIdentifier = function(name)
+                for _, id in pairs(state.active) do if names[id] == name then return id end end
+            end,
+        },
+        C_ActionBar = {FindSpellActionButtons = spellButtons},
+    }
+    char().known[500] = true
+    withAPI(api, function() run(state) end)
+end
+
+test("observe both stances without applying, even with Auto-fill off, in combat or holding an action", function()
+    transformWorld(function(s)
+        BarsmithDB.auto, w.combat, w.cursor = false, true, {"spell", 1}
+        s.active[500] = 501; event("UPDATE_SHAPESHIFT_FORM")
+        s.active[500] = 502; event("SPELLS_CHANGED")
+        s.active[500] = nil; event("UPDATE_SHAPESHIFT_FORM")
+        assert(not idAt(81) and not idAt(105) and w.cursor[2] == 1 and not P.active().text and w.saves == 0)
+        w.combat, w.cursor = false, nil
+        reload(); event("PLAYER_ENTERING_WORLD")
+        local text = plan("SLOT\t81\tspell\tStep (Guard)\nSLOT\t105\tspell\tStep (Assault)\nSLOT\t2\tspell\tspell:501")
+        apply(text)
+        assert(idAt(81) == 500 and idAt(105) == 500 and not idAt(2) and P.active().pending[2])
+        local export = BP.parse(BP.exportCurrent())
+        assert(#export.slots == 2)
+        for _, slot in ipairs(export.slots) do assert(slot.value == "spell:500") end
+        revert()
+        assert(P.manage("create", "Other", text)); apply(text)
+        assert(idAt(81) == 500)
+        w.guid = "Player-B"; char().known[500] = true; reload()
+        apply(text)
+        assert(not idAt(81) and not idAt(105))
+    end)
+end)
+
+test("inactive history cannot survive loss of its base, learned spells, or a different talent allocation after reload", function()
+    transformWorld(function(s)
+        local text = plan("SLOT\t81\tspell\tStep (Guard)")
+        s.active[500] = 501; event(); s.active[500] = nil
+        has(BP.run(text, true), "Check OK")
+        s.noBook, char().known[500] = true, false
+        local _, _, details = BP.run(text, false)
+        has(details, "intended")
+        assert(not idAt(81))
+        s.noBook, char().known[500] = false, true
+        w.event("LEARNED_SPELL_IN_SKILL_LINE", 500); event(); apply(text)
+        assert(not idAt(81))
+        s.active[500] = 501; event("UPDATE_STEALTH"); s.active[500] = nil
+        s.talent = 22 -- same config ID, rank and points spent, different selection
+        reload(); event("PLAYER_ENTERING_WORLD"); apply(text)
+        assert(not idAt(81))
+        s.active[500] = 501; event("UPDATE_STEALTH"); s.active[500] = nil
+        s.rank = 2; event("PLAYER_TALENT_UPDATE"); apply(text)
+        assert(not idAt(81))
+        s.active[500] = 501; event("UPDATE_STEALTH"); s.active[500] = nil
+        s.build = "101"; reload(); apply(text)
+        assert(not idAt(81))
+    end)
+end)
+
+test("two observed physical owners of one display stay ambiguous; a newly separate book row wins", function()
+    transformWorld(function(s)
+        local text = plan("SLOT\t81\tspell\tStep (Guard)")
+        s.second, s.active[500] = true, 501; event("UPDATE_SHAPESHIFT_FORM")
+        s.active[500], s.active[510] = nil, 501; event("UPDATE_SHAPESHIFT_FORM")
+        s.active[510] = nil
+        local _, _, details = BP.run(text, true)
+        has(details, "multiple learned actions")
+        has(BP.run(text, false), "Done:"); assert(not idAt(81))
+        s.separate = true
+        apply(text); assert(idAt(81) == 501)
+    end)
+end)
+
+test("selected talent metadata discovers a verified inactive replacement before either state is visited", function()
+    transformWorld(function(s)
+        s.traitAlias, s.traitBase = 502, 500
+        local text = plan("SLOT\t81\tspell\tStep (Assault)\nSLOT\t2\tspell\tspell:502")
+        apply(text)
+        assert(idAt(81) == 500 and not idAt(2))
+    end)
+end)
+
+test("a delayed talent load can preserve observations and override events discover unlisted abilities", function()
+    transformWorld(function(s)
+        s.loading, s.noBook = true, true
+        event("PLAYER_ENTERING_WORLD")
+        s.loading = false
+        w.event("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED", 500, 501)
+        reload()
+        apply(plan("SLOT\t81\tspell\tStep (Guard)"))
+        assert(idAt(81) == 500)
+    end)
+end)
+
+test("a checked unlisted name can be observed without Apply and survives logout; ranks and invented names stay exact", function()
+    transformWorld(function(s)
+        BarsmithDB.auto, s.noBook = false, true
+        local text = plan("SLOT\t81\tspell\tStep (Guard)\nSLOT\t105\tspell\tStep (Assault)\n"
+            .. "SLOT\t2\tspell\tStep (Rank 1)\nSLOT\t3\tspell\tStep (Unseen)")
+        s.active[500] = 501
+        has(BP.run(text, true), "Check OK")
+        assert(not P.character().spellTransforms and not P.active().text)
+        s.active[500] = 502
+        -- Only inverse lookup of an exact watched name can find the base.
+        withAPI({ C_Spell = { GetBaseSpell = C_Spell.GetBaseSpell, GetSpellName = C_Spell.GetSpellName,
+            GetSpellIDForSpellIdentifier = C_Spell.GetSpellIDForSpellIdentifier } }, function()
+            event("UPDATE_SHAPESHIFT_FORM")
+        end)
+        s.active[500] = nil
+        event("PLAYER_LOGOUT"); reload()
+        w.event("LEARNED_SPELL_IN_SKILL_LINE", 700)
+        apply(text)
+        assert(idAt(81) == 500 and idAt(105) == 500 and not idAt(2) and not idAt(3))
+    end)
+end)
+
+test("cache-backed export requires physical slot evidence and protects a user's separate action", function()
+    transformWorld(function(s)
+        s.active[500] = 501; event("UPDATE_SHAPESHIFT_FORM"); s.active[500] = nil
+        spell(81, 500); spell(105, 501)
+        local raw = GetActionInfo
+        withAPI({ GetActionInfo = function(slot)
+            if slot == 81 then return "spell", 501 end
+            return raw(slot)
+        end }, function()
+            local exported = BP.parse(BP.exportCurrent())
+            assert(#exported.slots == 2 and exported.slots[1].value == "spell:500" and exported.slots[2].value == "spell:501")
+            withAPI({ C_ActionBar = {FindSpellActionButtons = function() return {} end} }, function()
+                local ok, reason = pcall(BP.exportCurrent)
+                assert(not ok); has({ reason }, "Cannot identify the physical spell")
+            end)
+        end)
+        assert(idAt(81) == 500 and idAt(105) == 501)
+    end)
+end)
+
+test("a same-name reassignment or an unannounced talent change blocks stale Apply", function()
+    transformWorld(function(s)
+        s.active[500] = 501; event("UPDATE_STEALTH"); s.active[500] = nil
+        local text = plan("SLOT\t81\tspell\tStep (Guard)\nENSURE\tB\tBUTTON")
+        has(BP.run(text, true), "Check OK")
+        s.talent = 22
+        local summary = BP.run(text, false)
+        has(summary, "Run Check again")
+        assert(not idAt(81) and w.keys.B == "PACK")
+        s.talent = 21
+        local name = C_Spell.GetSpellName
+        withAPI({ C_Spell = {
+            GetSpellName = function(id) return id == 777 and "Step (Guard)" or name(id) end,
+            GetSpellIDForSpellIdentifier = function() return 777 end,
+        } }, function()
+            local _, _, details = BP.run(text, true)
+            has(details, "observed and current spell relationships disagree")
+            has(BP.run(text, false), "Done:")
+            assert(not idAt(81))
+        end)
+    end)
+end)
+
+test("unreadable talent context limits observations to this session", function()
+    transformWorld(function(s)
+        s.loading, s.active[500] = true, 501
+        event("UPDATE_SHAPESHIFT_FORM"); s.active[500] = nil
+        local text = plan("SLOT\t81\tspell\tStep (Guard)")
+        apply(text)
+        assert(idAt(81) == 500 and not P.character().spellTransforms)
+        revert(); reload(); apply(text)
+        assert(not idAt(81))
+    end)
+end)
+
+test("discovery feeds the existing pending-slot Auto-fill once per newly verified action", function()
+    transformWorld(function(s)
+        local text = plan("SLOT\t81\tspell\tStep (Guard)\nSLOT\t105\tspell\tStep (Assault)")
+        apply(text)
+        local place, writes = PlaceAction, 0
+        withAPI({PlaceAction = function(slot) writes = writes + 1; place(slot) end}, function()
+            s.active[500] = 501; event(); assert(idAt(81) == 500 and not idAt(105))
+            s.active[500] = 502; event(); assert(idAt(105) == 500)
+            spell(81, 1)
+            s.active[500] = nil; event(); event("BAG_UPDATE_DELAYED")
+            s.active[500] = 501; event()
+            assert(writes == 2 and idAt(81) == 1 and w.keys.R == "RUN" and not next(P.active().pending))
+        end)
     end)
 end)
 
