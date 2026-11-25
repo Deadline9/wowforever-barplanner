@@ -523,9 +523,15 @@ function BP.changes.slotSpellID(slot, reported, book)
     for base in pairs(bookBases(book, reported)) do locate(base) end
     local v = book.transforms
     local history = v and v.edges[reported]
-    if history and not verified and not slotContainsSpell(slot, reported) then
+    if history and not verified then
+        local containsReported = slotContainsSpell(slot, reported)
         for base in pairs(history) do
-            if placeableBase(book, base) then locate(base) end
+            if placeableBase(book, base) then
+                if containsReported then
+                    assert(not slotContainsSpell(slot, base), ("Ambiguous physical spell on %s [%d]: both %d and observed base %d match.")
+                        :format(slotLabel(slot), slot, reported, base))
+                else locate(base) end
+            end
         end
     end
     if competing and not verified and not slotContainsSpell(slot, reported) then
