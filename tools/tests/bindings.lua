@@ -375,7 +375,7 @@ for version = 1, 2 do
             C_SpellBook = { IsSpellKnownOrInSpellBook = function(id) return learned[id] end }
         end
         ClearCursor = function() cursor = nil end
-        GetCursorInfo = function() if cursor then return "spell", cursor end end
+        GetCursorInfo = function() if cursor then return "spell", 17, "spell", cursor end end
         PlaceAction = function(slot) slots[slot] = assert(cursor) end
         HasAction = function(slot) return slots[slot] ~= nil end
         GetActionInfo = function(slot) if slots[slot] then return "spell", slots[slot] end end

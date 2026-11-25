@@ -60,6 +60,7 @@ HasAction = function(s) return char().slots[s] ~= nil end
 GetCursorInfo = function()
     if w.cursor then
         if w.cursor[1] == "macro" then return "macro", GetMacroIndexByName(w.cursor[2]) end
+        if w.cursor[1] == "spell" then return "spell", 17, "spell", w.cursor[2] end
         return unpack(w.cursor)
     end
 end
@@ -1229,6 +1230,284 @@ test("excluded dangling slots remain untouched during a reapply", function()
     apply(text)
     assert(idAt(79) == combatNames[1] and HasAction(97) and not GetActionText(97))
     assert(HasAction(104) and not GetActionText(104) and idAt(55) == "Keep 7")
+end)
+
+local function spellButtons(id)
+    local slots = {}
+    for slot, action in pairs(char().slots) do
+        if action[1] == "spell" and action[2] == id then table.insert(slots, slot) end
+    end
+    return slots
+end
+
+test("a learned action survives changing stance, effective cursor IDs and transiently blank slot reads", function()
+    local rawAction, cursor, active = GetActionInfo, GetCursorInfo, 301
+    local pickups, blank = 0, false
+    char().known[51] = true
+    withAPI({
+        PickupSpell = function(id) pickups = pickups + 1; w.cursor = { "spell", id } end,
+        GetCursorInfo = function()
+            if w.cursor and w.cursor[2] == 51 then return "spell", 9, "spell", active, 51 end
+            return cursor()
+        end,
+        GetActionInfo = function(slot)
+            if slot == 81 and idAt(slot) == 51 then
+                if blank then return end
+                return "spell", active
+            end
+            return rawAction(slot)
+        end,
+        HasAction = function(slot) return not blank and idAt(slot) ~= nil end,
+        C_ActionBar = { FindSpellActionButtons = spellButtons, GetSpell = idAt },
+    }, function()
+        local text = plan("SLOT\t81\tspell\tspell:51")
+        for _, stance in ipairs({ 301, 302, 303 }) do
+            active = stance
+            apply(text)
+            assert(idAt(81) == 51 and not P.active().pending[81])
+            local afterApply = pickups
+            active = stance + 10
+            local export = BP.parse(BP.exportCurrent())
+            assert(export.slots[1].value == "spell:51")
+            blank = true
+            event(); event("BAG_UPDATE_DELAYED"); event()
+            blank = false
+            assert(pickups == afterApply)
+            revert()
+        end
+    end)
+end)
+
+test("a wrong book pickup retries by exact ID before touching the slot", function()
+    char().known[41] = true
+    local calls, original = {}, PickupSpell
+    withAPI({
+        GetNumSpellTabs = function() return 1 end,
+        GetSpellTabInfo = function() return nil, nil, 0, 1 end,
+        GetSpellBookItemInfo = function() return "SPELL", 41 end,
+        GetSpellBookItemName = function() return "Technique", "Stance A", 41 end,
+        PickupSpellBookItem = function() table.insert(calls, "book"); w.cursor = { "spell", 42 } end,
+        PickupSpell = function(id) assert(not w.cursor); table.insert(calls, id); original(id) end,
+    }, function()
+        apply(plan("SLOT\t81\tspell\tTechnique (Stance A)"))
+        assert(#calls == 2 and calls[1] == "book" and calls[2] == 41 and idAt(81) == 41)
+    end)
+end)
+
+for _, case in ipairs({
+    { name = "sibling override", cursor = { "spell", 51, "spell", 53, 50 }, issue = "cursor base does not identify" },
+    { name = "sibling without a fifth result", cursor = { "spell", 51, "spell", 53 }, issue = "unexpected cursor spell ID" },
+    { name = "pet action", cursor = { "petaction", 51 }, issue = "unexpected cursor type" },
+    { name = "pet bank", cursor = { "spell", 51, "pet", 51 }, issue = "unexpected spellbook bank" },
+    { name = "book index equal to requested ID", cursor = { "spell", 51 }, issue = "missing cursor spell identity" },
+    { name = "unavailable pickup", cursor = {}, issue = "empty cursor" },
+}) do
+    test("pickup rejects " .. case.name .. " with diagnostics and restores previous writes", function()
+        local cursor, pickup = GetCursorInfo, PickupSpell
+        char().known[51] = true
+        spell(81, 1)
+        withAPI({
+            C_Spell = { GetBaseSpell = function(id) return id >= 51 and 50 or id end,
+                GetOverrideSpell = function(id) return id == 50 and 53 or id end },
+            GetCursorInfo = function()
+                if w.cursor and w.cursor[2] == 51 then return unpack(case.cursor) end
+                return cursor()
+            end,
+            PickupSpell = function(id) pickup(id) end,
+        }, function()
+            local text = plan("SLOT\t1\tspell\tWrath\nSLOT\t81\tspell\tspell:51\nENSURE\tB\tBUTTON")
+            has(BP.run(text, true), "Check OK")
+            local summary, _, details = BP.run(text, false)
+            has(summary, "Previous state restored")
+            has(details, "Cat Form button 9 [81], request spell:51")
+            has(details, "base 50, override 51")
+            has(details, case.issue)
+            assert(idAt(81) == 1 and not idAt(1) and w.keys.B == "PACK" and not P.active().undo and not w.cursor)
+        end)
+    end)
+end
+
+test("a base-only cursor for an explicit variant requires exclusive physical membership", function()
+    local cursor, place = GetCursorInfo, PlaceAction
+    local storesBase = false
+    char().known[51], char().known[50] = true, true
+    spell(81, 1)
+    withAPI({
+        GetCursorInfo = function()
+            if w.cursor and w.cursor[2] == 51 then return "spell", 4, "spell", 50 end
+            return cursor()
+        end,
+        C_Spell = { GetBaseSpell = function(id) return id == 51 and 50 or id end,
+            GetOverrideSpell = function(id) return id == 50 and 51 or id end },
+        C_ActionBar = { FindSpellActionButtons = spellButtons },
+        PlaceAction = function(slot)
+            if storesBase and w.cursor[2] == 51 then w.cursor[2] = 50 end
+            place(slot)
+        end,
+    }, function()
+        local text = plan("SLOT\t81\tspell\tspell:51")
+        apply(text)
+        assert(idAt(81) == 51)
+        revert()
+        storesBase = true
+        has(BP.run(text, true), "Check OK")
+        local summary, _, details = BP.run(text, false)
+        has(summary, "Previous state restored")
+        has(details, "reported spell 50, stored spell 50, expected spell 51")
+        assert(idAt(81) == 1 and not w.cursor)
+    end)
+end)
+
+test("a qualified temporary override becomes eligible only when independently learned", function()
+    local visible, known, picks = true, false, 0
+    withAPI({
+        C_Spell = { GetSpellIDForSpellIdentifier = function() return 71 end,
+            GetSpellName = function() return "Technique (Stealth)" end,
+            PickupSpell = function(id) picks = picks + 1; w.cursor = { "spell", id } end },
+        C_SpellBook = { IsSpellKnownOrInSpellBook = function(_, _, includeOverrides)
+            return known or (includeOverrides ~= false and visible)
+        end },
+    }, function()
+        local text = plan("SLOT\t81\tspell\tTechnique (Stealth)")
+        local _, _, details = BP.run(text, true)
+        has(details, "temporary override (spell:71)")
+        has(BP.run(text, false), "Done:")
+        for _ = 1, 3 do visible = false; event(); visible = true; event() end
+        assert(picks == 0 and P.active().pending[81])
+        known = true
+        event("LEARNED_SPELL_IN_SKILL_LINE")
+        assert(idAt(81) == 71 and picks == 1 and not P.active().pending[81])
+    end)
+end)
+
+test("failed spell sleeps through event storms while independent spells and bag reservations fill", function()
+    local attempts, rank, bag, learned = 0, 81, false, false
+    local pickup = PickupSpell
+    withAPI({
+        C_Spell = { GetSpellIDForSpellIdentifier = function(name)
+            if name == "Technique" then return learned and rank end
+        end, PickupSpell = function(id)
+            if id == 81 then attempts = attempts + 1; return end
+            if id == 82 then attempts = attempts + 1; w.cursor = { "spell", id }; return end
+            pickup(id)
+        end },
+        IsSpellKnown = function(id) return learned and id == rank end,
+        GetItemCount = function() return bag and 1 or 0 end,
+        PickupItem = function(id) w.cursor = { "item", id } end,
+    }, function()
+        local text = plan("SLOT\t81\tspell\tTechnique\nSLOT\t2\tspell\tDash\nSLOT\t3\titem\titem:42")
+        apply(text)
+        learned, char().known[3], bag = true, true, true
+        event("BAG_UPDATE_DELAYED")
+        assert(idAt(3) == 42 and not idAt(2) and attempts == 0)
+        event()
+        assert(idAt(2) == 3 and attempts == 1 and not idAt(81))
+        has(w.chat, "Auto-fill paused for Cat Form button 9 [81] (pending)")
+        local messages = #w.chat
+        for _ = 1, 3 do event(); event("BAG_UPDATE_DELAYED") end
+        learned = false; event(); learned = true; event()
+        assert(#w.chat == messages and attempts == 1)
+        rank = 82
+        event()
+        assert(idAt(81) == 82 and attempts == 2 and not next(P.active().pending))
+    end)
+end)
+
+test("coalesced bag and spell notifications survive both combat and cursor deferral", function()
+    local count, bag = 0, false
+    withAPI({
+        C_Timer = { After = function(_, fn) count = count + 1; w.timer = fn end },
+        GetItemCount = function() return bag and 1 or 0 end,
+        PickupItem = function(id) w.cursor = { "item", id } end,
+    }, function()
+        apply(plan("SLOT\t1\tspell\tDash\nSLOT\t2\titem\titem:42"))
+        w.combat, char().known[3], bag = true, true, true
+        w.event("SPELLS_CHANGED"); w.event("SPELLS_CHANGED"); event("BAG_UPDATE_DELAYED")
+        assert(count == 1 and not idAt(1) and not idAt(2))
+        w.combat, w.cursor = false, { "spell", 1 }
+        event("PLAYER_REGEN_ENABLED")
+        assert(not idAt(1) and not idAt(2))
+        w.cursor = nil; event("CURSOR_CHANGED")
+        assert(count == 3 and idAt(1) == 3 and idAt(2) == 42)
+    end)
+end)
+
+test("a transient false HasAction cannot authorize an occupied slot replacement", function()
+    apply(plan("SLOT\t81\tspell\tWrath"))
+    P.active().overwrite = true
+    spell(81, 1)
+    withAPI({ HasAction = function() return false end }, function()
+        event(); event()
+        assert(idAt(81) == 1 and #w.prompts == 0)
+    end)
+end)
+
+test("a verified placement requires a physical empty-slot change to re-arm the same refill", function()
+    local pickup, attempts = PickupSpell, 0
+    withAPI({ PickupSpell = function(id) attempts = attempts + 1; pickup(id) end }, function()
+        apply(plan("SLOT\t81\tspell\tWrath"))
+        withAPI({ GetActionInfo = function() end, HasAction = function() return false end }, function()
+            w.event("ACTIONBAR_SLOT_CHANGED", 0)
+            event(); event(); event("BAG_UPDATE_DELAYED")
+            assert(attempts == 1 and idAt(81) == 5)
+        end)
+        char().slots[81] = nil
+        w.event("ACTIONBAR_SLOT_CHANGED", 81)
+        assert(attempts == 1)
+        event(); event()
+        assert(attempts == 2 and idAt(81) == 5)
+    end)
+end)
+
+test("a hidden player book row verifies its base when the cursor omits its fifth field", function()
+    local effective = 700
+    local cursor = GetCursorInfo
+    local row = { itemType = 1, actionID = 61, spellID = effective, name = "Shifted technique" }
+    withAPI({
+        Enum = { SpellBookSpellBank = { Player = 0, Pet = 1 }, SpellBookItemType = { Spell = 1 } },
+        C_SpellBook = {
+            FindSpellBookSlotForSpell = function() return 7, 0 end,
+            GetSpellBookItemInfo = function(i, bank) if i == 7 and bank == 0 then return row end end,
+            PickupSpellBookItem = function(i, bank) assert(i == 7 and bank == 0); w.cursor = { "spell", 61 } end,
+        },
+        GetCursorInfo = function()
+            if w.cursor and w.cursor[2] == 61 then return "spell", 7, "spell", effective end
+            return cursor()
+        end,
+    }, function()
+        apply(plan("SLOT\t81\tspell\tspell:61"))
+        assert(idAt(81) == 61)
+        effective = 799 -- same book index, unexpected effective spell
+        local text = plan("SLOT\t82\tspell\tspell:61")
+        has(BP.run(text, true), "Check OK")
+        local _, _, details = BP.run(text, false)
+        has(details, "unexpected cursor spell ID")
+        assert(not idAt(82) and idAt(81) == 61)
+    end)
+end)
+
+test("login seeds verified placements and explicit Auto-fill re-enable retries a failed slot", function()
+    local pickup, calls, fail = PickupSpell, 0, false
+    withAPI({ PickupSpell = function(id)
+        calls = calls + 1
+        if not fail then pickup(id) end
+    end }, function()
+        apply(plan("SLOT\t81\tspell\tWrath"))
+        reload(); event("PLAYER_ENTERING_WORLD")
+        withAPI({ GetActionInfo = function() end, HasAction = function() return false end }, function()
+            event()
+            assert(calls == 1)
+        end)
+        char().slots[81] = nil
+        w.event("ACTIONBAR_SLOT_CHANGED", 81)
+        fail = true
+        event(); event()
+        assert(calls == 2 and not idAt(81))
+        fail = false
+        SlashCmdList.BARSMITH("auto"); SlashCmdList.BARSMITH("auto")
+        event()
+        assert(calls == 3 and idAt(81) == 5)
+    end)
 end)
 
 print(passed .. " passed, " .. failed .. " failed")

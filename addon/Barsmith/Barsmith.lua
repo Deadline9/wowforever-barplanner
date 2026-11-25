@@ -292,9 +292,28 @@ local function spellKnown(id)
         or (IsSpellKnownOrOverridesKnown and IsSpellKnownOrOverridesKnown(id))
 end
 
+local function baseSpell(id)
+    local find = C_SpellBook and C_SpellBook.FindBaseSpellByID or C_Spell and C_Spell.GetBaseSpell
+    return find and id and find(id)
+end
+
+local function overrideSpell(id)
+    local find = C_SpellBook and C_SpellBook.FindSpellOverrideByID or C_Spell and C_Spell.GetOverrideSpell
+    return find and id and find(id)
+end
+
+-- Exclude override-only matches when the plan asks for a specific variant.
+local function independentlyKnown(id)
+    local bank = Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player
+    return isKnownSpell(id)
+        or (C_SpellBook and C_SpellBook.IsSpellKnownOrInSpellBook and C_SpellBook.IsSpellKnownOrInSpellBook(id, bank, false))
+        or (C_SpellBook and C_SpellBook.IsSpellKnown and C_SpellBook.IsSpellKnown(id))
+end
+
 -- A name lookup can see spells outside the enumerated skill lines. Confirm the
 -- returned ID belongs to this player before using it as a pickup target.
 local function learnedSpellIDByName(name, rank)
+    local overrideOnly
     local function matches(id)
         if not id or id <= 0 then return false end
         local passive = (C_Spell and C_Spell.IsSpellPassive) or IsPassiveSpell
@@ -310,6 +329,10 @@ local function learnedSpellIDByName(name, rank)
                 if actualName ~= "" and actualName ~= wanted:match("^(.-)%(") then return false end
             end
         end
+        if rank and not independentlyKnown(id) then
+            if spellKnown(id) then overrideOnly = id end
+            return false
+        end
         return spellKnown(id)
     end
     if C_Spell and C_Spell.GetSpellIDForSpellIdentifier then
@@ -324,6 +347,7 @@ local function learnedSpellIDByName(name, rank)
         local id = select(7, GetSpellInfo(name))
         if matches(id) then return id end
     end
+    return nil, overrideOnly
 end
 
 local function getItemName(id)
@@ -398,35 +422,112 @@ BP.changes.spellbookEntries = spellbookEntries
 -- A displayed override can represent different stored spells on different
 -- buttons. Only substitute a base ID when the action-bar API locates that
 -- base on this physical slot. Never infer an ability from the page's form.
+local function slotContainsSpell(slot, id)
+    if not (C_ActionBar and C_ActionBar.FindSpellActionButtons) then return false end
+    local bank = Enum and Enum.ActionBarSet and Enum.ActionBarSet.Mkb
+    for _, button in ipairs(C_ActionBar.FindSpellActionButtons(id, bank) or {}) do
+        if slot == button then return true end
+    end
+    return false
+end
+
 function BP.changes.slotSpellID(slot, reported, book)
     if not (C_ActionBar and C_ActionBar.FindSpellActionButtons) then return reported end
     local verified
     local function locate(base)
         if not base or base <= 0 or base == reported or base == verified then return end
-        local bank = Enum and Enum.ActionBarSet and Enum.ActionBarSet.Mkb
-        for _, button in ipairs(C_ActionBar.FindSpellActionButtons(base, bank) or {}) do
-            if slot == button then
-                assert(not verified, "Ambiguous base spell on " .. slotLabel(slot) .. " [" .. slot .. "]")
-                verified = base
-                break
-            end
+        if slotContainsSpell(slot, base) then
+            assert(not verified, "Ambiguous base spell on " .. slotLabel(slot) .. " [" .. slot .. "]")
+            verified = base
         end
     end
-    if C_SpellBook and C_SpellBook.FindBaseSpellByID then locate(C_SpellBook.FindBaseSpellByID(reported)) end
+    locate(baseSpell(reported))
+    if C_ActionBar.GetSpell then locate(C_ActionBar.GetSpell(slot)) end
     for _, entry in ipairs(book or spellbookEntries()) do
         if entry.overrideID == reported then locate(entry.spellID) end
     end
     return verified or reported
 end
 
-local function pickupBookEntry(e)
+local function pickupBookEntry(index)
     if useNewSpellBook() and C_SpellBook.PickupSpellBookItem then
-        C_SpellBook.PickupSpellBookItem(e.index, Enum.SpellBookSpellBank.Player)
+        C_SpellBook.PickupSpellBookItem(index, Enum.SpellBookSpellBank.Player)
     elseif PickupSpellBookItem then
-        PickupSpellBookItem(e.index, BOOK)
+        PickupSpellBookItem(index, BOOK)
     end
-    if not GetCursorInfo() and e.spellID then pickupSpellID(e.spellID) end
 end
+
+local function exactBookIndex(id)
+    if useNewSpellBook() and C_SpellBook.FindSpellBookSlotForSpell then
+        local i, bank = C_SpellBook.FindSpellBookSlotForSpell(id, true, true, false, false)
+        if i and bank == Enum.SpellBookSpellBank.Player then
+            local row = C_SpellBook.GetSpellBookItemInfo(i, bank)
+            if row and row.itemType == Enum.SpellBookItemType.Spell and not row.isPassive and row.actionID == id then return i end
+        end
+    end
+end
+
+local function spellTarget(id, entry)
+    local index = entry and entry.index or exactBookIndex(id)
+    return { kind = "spell", id = id, pickup = function(alternate)
+        if alternate and not index then return false end
+        if index and not alternate then pickupBookEntry(index) else pickupSpellID(id) end
+    end }
+end
+
+local function cursorBookRow(index, bank)
+    if not (index and index > 0 and bank ~= nil) then return end
+    if useNewSpellBook() then
+        local row = C_SpellBook.GetSpellBookItemInfo(index, Enum.SpellBookSpellBank.Player)
+        if row and row.itemType == Enum.SpellBookItemType.Spell then return row.actionID, row.spellID end
+    elseif GetSpellBookItemInfo then
+        local kind, id = GetSpellBookItemInfo(index, BOOK)
+        if kind == "SPELL" then return id end
+    end
+end
+
+-- GetCursorInfo's second result is a book index. Its fourth and fifth
+-- results identify the effective and base spells. A common ancestor alone
+-- cannot establish which of two independently requested variants is held.
+function BP.changes.spellCursor(slot, wanted, requested)
+    local kind, index, bank, effective, base = GetCursorInfo()
+    local playerBank = Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player
+    local issue, competingBase, rowBase, rowEffective
+    local targetBase, targetOverride = baseSpell(wanted), overrideSpell(wanted)
+    local cursorBase = kind == "spell" and effective and effective > 0 and baseSpell(effective) or nil
+    local validBank = bank == nil or bank == BOOK or bank == playerBank
+    if kind == "spell" and validBank and (not base or base <= 0) and effective ~= wanted then
+        rowBase, rowEffective = cursorBookRow(index, bank)
+    end
+    if not kind then issue = "pickup unavailable (empty cursor)"
+    elseif kind ~= "spell" then issue = "unexpected cursor type"
+    elseif not validBank then issue = "unexpected spellbook bank"
+    elseif base and base > 0 then
+        if base ~= wanted then
+            if effective == wanted and base == targetBase then competingBase = base
+            else issue = "cursor base does not identify the requested spell" end
+        end
+    elseif effective and effective > 0 then
+        if effective ~= wanted then
+            if (effective == targetBase and overrideSpell(effective) == wanted)
+                or (rowBase == effective and rowEffective == wanted) then competingBase = effective
+            elseif effective ~= targetOverride and not (rowBase == wanted and rowEffective == effective) then issue = "unexpected cursor spell ID" end
+        end
+    elseif bank ~= nil and index and index > 0 then
+        if rowBase ~= wanted then issue = "cursor book row does not identify the requested spell" end
+    else issue = "missing cursor spell identity" end
+    if competingBase and not (C_ActionBar and C_ActionBar.FindSpellActionButtons) then
+        issue = "cannot verify the physical slot independently of the displayed override"
+    end
+    local function diagnostic(reason)
+        return ("%s [%d], request %s, resolved %s (%s), base %s, override %s; cursor type %s, index %s, bank %s, spell %s, base %s, lookup base %s: %s")
+            :format(slotLabel(slot), slot, tostring(requested or ("spell:" .. wanted)), tostring(getSpellName(wanted) or "?"),
+                wanted, tostring(targetBase), tostring(targetOverride), tostring(kind), tostring(index), tostring(bank),
+                tostring(effective), tostring(base), tostring(cursorBase), reason)
+    end
+    return issue, diagnostic, competingBase
+end
+BP.changes.slotContainsSpell = slotContainsSpell
 
 -- value: "Lightning Bolt", "Healing Wave(Rank 1)" or "spell:403".
 -- Returns { kind, id, pickup } or nil, reason.
@@ -434,15 +535,15 @@ local function resolveSpell(value, book)
     local id = tonumber(value:match("^spell:(%d+)$"))
     if id then
         -- An explicit ID authorizes only that learned spell or book entry.
-        if not (isKnownSpell(id) or (C_SpellBook and C_SpellBook.IsSpellKnown and C_SpellBook.IsSpellKnown(id))) then
+        if not independentlyKnown(id) and not exactBookIndex(id) then
             for _, e in ipairs(book) do
                 if e.spellID == id then
-                    return { kind = "spell", id = id, pickup = function() pickupBookEntry(e) end }
+                    return spellTarget(id, e)
                 end
             end
             return nil, "not learned yet"
         end
-        return { kind = "spell", id = id, pickup = function() pickupSpellID(id) end }
+        return spellTarget(id)
     end
     local base, rank = value:match("^(.-)%s*%(([^()]*)%)$")
     base = (base or value):lower()
@@ -466,24 +567,34 @@ local function resolveSpell(value, book)
         error("Multiple spell variants for " .. value .. ". Specify the form or spell:ID.")
     end
     if found then
-        return { kind = "spell", id = found.spellID, pickup = function() pickupBookEntry(found) end }
+        return spellTarget(found.spellID, found)
     end
     -- Preserve the book's rank selection above. On a miss, ask the client for
     -- the learned form/override by name, keeping any rank or form qualifier.
-    id = learnedSpellIDByName(value, rank)
+    local overrideOnly
+    id, overrideOnly = learnedSpellIDByName(value, rank)
     if not id and rank then
         local qualified = value:gsub("%s+%(([^()]*)%)$", "(%1)")
-        if qualified ~= value then id = learnedSpellIDByName(qualified, rank) end
+        if qualified ~= value then
+            local other
+            id, other = learnedSpellIDByName(qualified, rank)
+            overrideOnly = overrideOnly or other
+        end
     end
+    if not id and overrideOnly and exactBookIndex(overrideOnly) then id = overrideOnly end
     if id then
-        if not rank and C_SpellBook and C_SpellBook.FindBaseSpellByID then
-            local baseID = C_SpellBook.FindBaseSpellByID(id)
+        if not rank then
+            local baseID = baseSpell(id)
             if baseID and baseID ~= id and (getSpellName(baseID) or ""):lower() == base and spellKnown(baseID) then
                 id = baseID
             end
         end
-        return { kind = "spell", id = id, pickup = function() pickupSpellID(id) end }
+        if not independentlyKnown(id) and not exactBookIndex(id) then
+            return nil, "only available as a temporary override (spell:" .. id .. ")"
+        end
+        return spellTarget(id)
     end
+    if overrideOnly then return nil, "only available as a temporary override (spell:" .. overrideOnly .. ")" end
     if rank then
         return nil, "that rank isn't in your spellbook (turn on Show All Spell Ranks)"
     end
@@ -501,9 +612,9 @@ local C, P = BP.changes, BP.profiles
 
 function C.pickup(action)
     if action.kind == "spell" then
-        if spellKnown(action.id) then return function() pickupSpellID(action.id) end end
+        if independentlyKnown(action.id) then return spellTarget(action.id).pickup end
         for _, entry in ipairs(spellbookEntries()) do
-            if entry.spellID == action.id then return function() pickupBookEntry(entry) end end
+            if entry.spellID == action.id then return spellTarget(action.id, entry).pickup end
         end
     elseif action.kind == "item" and haveItem(action.id) then
         return function() pickupItem(action.id) end
@@ -609,7 +720,7 @@ local function reviewPlan(plan, preview, profile, reapplying)
         binding = preview, bound = preview and #preview.changes or 0, bindsSame = preview and preview.same or 0,
         placed = 0, same = 0, cleared = 0, macrosNew = 0, macrosChanged = 0, macrosSame = 0,
         notLearned = {}, notInBags = {}, skipped = {}, problems = {}, slotDetails = {}, slotChanges = {},
-        ops = {}, macroChecks = {}, pending = {}, inspected = {}, overwrites = 0, futureOverwrites = 0,
+        ops = {}, macroChecks = {}, pending = {}, fulfilled = {}, inspected = {}, overwrites = 0, futureOverwrites = 0,
     }
     local pickups, macros, repairTargets = {}, {}, {}
     local account, character = GetNumMacros()
@@ -716,12 +827,14 @@ local function reviewPlan(plan, preview, profile, reapplying)
             end
         end
         if after then
+            if after.kind == "spell" or after.kind == "item" then r.fulfilled[s.slot] = after.id end
             if before.kind == "unresolvedMacro" then
                 description = "repair reference to " .. after.name
                 table.insert(r.problems, slotWhere(s.slot) .. ": verify and repair " .. after.name
                     .. ". A recoverable action stops repair. Revert leaves a confirmed broken reference empty.")
             end
-            local op = { slot = s.slot, before = before, after = after, previousMacro = oldMacro, placedMacro = nextMacro }
+            local op = { slot = s.slot, before = before, after = after, previousMacro = oldMacro, placedMacro = nextMacro,
+                requestedSpell = s.kind == "spell" and s.value or nil }
             if after.kind == "macro" then table.insert(r.macroChecks, op) end
             if C.equal(before, after) then
                 same, description = true, description or "already correct"
@@ -968,6 +1081,7 @@ end
 
 -- Check, batch confirmation and Revert all bind their review to the active profile.
 local review, refreshProfiles, queueAutoFill
+local autoFailures, fulfilled, autoProfile = {}, {}
 local function invalidate()
     checked, review = nil, nil
     if frame then frame.confirm:Hide(); frame.later:Hide() end
@@ -1055,6 +1169,7 @@ function BP.run(text, dry)
             if #r.ops > 0 or snapshot.bindings or not C.equal(state, profileState(profile)) then
                 profile.undo = snapshot
             end
+            autoFailures, fulfilled, autoProfile = {}, r.fulfilled, profile
             profile.lastApplied = text
             if BarsmithDB.last == text then BarsmithDB.last = nil end
             if BarsmithDB.legacyPlan == text then BarsmithDB.legacyPlan = nil end
@@ -1213,6 +1328,7 @@ function BP.revert(confirm)
         local u = profile.undo
         C.execute(ops, previous.preview and previous.preview.plan, previous.preview)
         profile.text, profile.pending, profile.undo = u.before.text, u.before.pending, nil
+        autoFailures, fulfilled = {}, {}
         if frame then loadEditor(profile.text or "") end
         return showStatus({ "Reverted the last Apply for this profile." })
     end)
@@ -1222,6 +1338,7 @@ end
 
 local function setAuto(enabled)
     BarsmithDB.auto = enabled
+    autoFailures, fulfilled = {}, {}
     invalidate()
     if frame then frame.auto:SetChecked(enabled) end
     if enabled then queueAutoFill()
@@ -1576,28 +1693,54 @@ end
 -- Only pending (previously unavailable) actions can displace an occupied slot.
 -- An empty slot on an applied profile retains the original refill behavior.
 local autoQueued, autoAfterCombat, autoAfterCursor = false, false, false
-local notified
-
-local function levelBatch(profile)
+-- Session-local failure records are scoped to the active profile and physical
+-- slot. Spell visibility can flicker without a new rank or a new destination.
+local notified, inspectionErrors = {}, {}
+local evaluationError
+local function levelBatch(profile, topics)
     local batch = { empty = {}, occupied = {}, settled = {} }
     local pickups = {}
     if not profile or not profile.pending or not profile.text then return batch, pickups end
     local plan = assert(BP.parse(profile.text))
     assert(not plan.class or plan.class == select(2, UnitClass("player")), "Plan class mismatch.")
-    local book = spellbookEntries()
+    local book = (not topics or topics.spell) and spellbookEntries() or nil
+    local function inspect(s)
+        local pending = profile.pending[s.slot]
+        if not pending and HasAction(s.slot) then
+            if not topics or not topics.full or fulfilled[s.slot] or GetActionInfo(s.slot) ~= s.kind then return end
+        end
+        local before = C.slot(s.slot, book)
+        if not pending and before.kind ~= "empty" and before.kind ~= s.kind then return end
+        local target = available(s, book)
+        if not target then return end
+        if before.kind == s.kind and before.id == target.id then return nil, nil, target.id end
+        if not pending and (before.kind ~= "empty" or (topics and fulfilled[s.slot] == target.id)) then return end
+        if before.kind == "empty" and s.kind == "spell" and slotContainsSpell(s.slot, target.id) then
+            -- The reverse action map still sees the spell while the forward
+            -- slot query is blank. Wait for a consistent read.
+            return
+        end
+        local op = { slot = s.slot, before = before, after = { kind = s.kind, id = target.id },
+            requestedSpell = s.kind == "spell" and s.value or nil }
+        if before.kind == "macro" then op.previousMacro = C.macro(before.name) end
+        return op, target.pickup
+    end
     for _, s in ipairs(managedSlots(plan, profile)) do
-        if (s.kind == "spell" or s.kind == "item") and (profile.pending[s.slot] or not HasAction(s.slot)) then
-            local target = available(s, book)
-            if target and target.id then
-                local before = C.slot(s.slot, book)
-                if before.kind == s.kind and before.id == target.id then
-                    table.insert(batch.settled, s.slot)
-                else
-                    local op = { slot = s.slot, before = before, after = { kind = s.kind, id = target.id } }
-                    if before.kind == "macro" then op.previousMacro = C.macro(before.name) end
-                    table.insert(before.kind == "empty" and batch.empty or batch.occupied, op)
-                    pickups[s.slot] = target.pickup
-                end
+        if (s.kind == "spell" or s.kind == "item") and (not topics or topics[s.kind]) then
+            local ok, op, pickup, settled = pcall(inspect, s)
+            if not ok then
+                if not topics then error(op, 0) end
+                local message = slotLabel(s.slot) .. " [" .. s.slot .. "] " .. s.value .. ": " .. tostring(op)
+                if inspectionErrors[s.slot] ~= message then say("Auto-fill could not evaluate " .. message) end
+                inspectionErrors[s.slot] = message
+            elseif op then
+                if topics then inspectionErrors[s.slot] = nil end
+                table.insert(op.before.kind == "empty" and batch.empty or batch.occupied, op)
+                pickups[s.slot] = pickup
+            elseif topics then
+                notified[s.slot], inspectionErrors[s.slot] = nil, nil
+                if settled then batch.settled[s.slot] = settled end
+                if settled or s.kind == "item" then autoFailures[s.slot] = nil end
             end
         end
     end
@@ -1617,10 +1760,36 @@ local function placeBatch(profile, ops, pickups)
         byIndex[i] = pickups[op.slot]
     end
     C.execute(ops, nil, nil, byIndex)
-    for _, op in ipairs(ops) do profile.pending[op.slot] = nil end
+    for _, op in ipairs(ops) do
+        profile.pending[op.slot], fulfilled[op.slot] = nil, op.after.id
+    end
 end
 
-function BP.levelUpdates(mode)
+local function autoPlace(profile, ops, pickups)
+    local count = 0
+    for _, op in ipairs(ops) do
+        local attempt = { before = op.before, id = op.after.id, previousMacro = op.previousMacro }
+        if not C.equal(autoFailures[op.slot], attempt) then
+            local ok, err = pcall(placeBatch, profile, { op }, pickups)
+            if ok then
+                autoFailures[op.slot] = nil
+                count = count + 1
+            else
+                autoFailures[op.slot] = attempt
+                local message = type(err) == "table" and err.message or tostring(err)
+                local reason = profile.pending[op.slot] and "pending" or "empty"
+                say(("Auto-fill paused for %s [%d] (%s): %s"):format(slotLabel(op.slot), op.slot, reason, message))
+                if type(err) == "table" then
+                    for _, detail in ipairs(err.details or {}) do say(detail) end
+                end
+                if GetCursorInfo() or message:find("Recovery incomplete", 1, true) then return count, true end
+            end
+        end
+    end
+    return count
+end
+
+function BP.levelUpdates(mode, topics)
     local profile = P.active()
     local previous = review
     if mode ~= "event" then invalidate() end
@@ -1630,7 +1799,10 @@ function BP.levelUpdates(mode)
     end
     local ok, err = pcall(function()
         ready()
-        local batch, pickups = levelBatch(profile)
+        if autoProfile ~= profile then
+            autoFailures, notified, inspectionErrors, fulfilled, autoProfile = {}, {}, {}, {}, profile
+        end
+        local batch, pickups = levelBatch(profile, mode == "event" and (topics or { spell = true, item = true }))
         local occupied = batch.occupied
         if mode == "confirm" then
             assert(previous and previous.kind == "level" and previous.profile == profile,
@@ -1640,22 +1812,25 @@ function BP.levelUpdates(mode)
             C.differences(changes, "Replacements", previous.batch, batchState(occupied))
             C.checkDifferences(changes, "Leveling replacements changed. Open Review pending updates again.")
             placeBatch(profile, occupied, pickups)
-            notified = nil
+            notified = {}
             return showStatus({ #occupied .. " reviewed replacements applied." })
         end
         if mode == "event" then
-            for _, slot in ipairs(batch.settled) do profile.pending[slot] = nil end
-            placeBatch(profile, batch.empty, pickups)
-            if #batch.empty > 0 then say("Filled " .. #batch.empty .. " empty managed slots.") end
-            if #occupied == 0 then notified = nil; return end
+            for slot, id in pairs(batch.settled) do profile.pending[slot], fulfilled[slot] = nil, id end
+            local filled, interrupted = autoPlace(profile, batch.empty, pickups)
+            if filled > 0 then say("Filled " .. filled .. " empty managed slots.") end
+            if #occupied == 0 or interrupted then return end
             if profile.overwrite then
-                placeBatch(profile, occupied, pickups)
-                say("Updated " .. #occupied .. " occupied managed slots for this profile.")
-                notified = nil
+                local updated = autoPlace(profile, occupied, pickups)
+                if updated > 0 then say("Updated " .. updated .. " occupied managed slots for this profile.") end
                 return
             end
-            if notified and notified.profile == profile and C.equal(notified.ops, occupied) then return end
-            notified = { profile = profile, ops = occupied }
+            local changed
+            for _, op in ipairs(occupied) do
+                if not C.equal(notified[op.slot], op) then changed = true end
+                notified[op.slot] = op
+            end
+            if not changed then return end
             local msg = #occupied .. " newly available actions would replace occupied managed slots."
             if StaticPopup_Show then
                 StaticPopup_Show("BARSMITH_LEVEL_UPDATES", msg)
@@ -1672,9 +1847,11 @@ function BP.levelUpdates(mode)
         end
     end)
     if not ok then
-        if mode == "event" then say("Auto-fill paused: " .. (type(err) == "table" and err.message or tostring(err)))
-        else return stopped("Level updates stopped", err) end
-    end
+        if mode ~= "event" then return stopped("Level updates stopped", err) end
+        local message = type(err) == "table" and err.message or tostring(err)
+        if evaluationError ~= message then say("Auto-fill evaluation stopped: " .. message) end
+        evaluationError = message
+    else evaluationError = nil end
 end
 
 if StaticPopupDialogs then
@@ -1710,8 +1887,9 @@ if StaticPopupDialogs then
 end
 
 P.onBarsChanged = function(first, managed)
+    for slot = first, first + 11 do autoFailures[slot], fulfilled[slot] = nil, nil end
     invalidate()
-    notified = nil
+    notified = {}
     if StaticPopup_Hide then StaticPopup_Hide("BARSMITH_LEVEL_UPDATES") end
     local state = managed and "enabled" or "excluded"
     showStatus({ ("Managed bars updated. Slots %d–%d %s. Run Check again."):format(first, first + 11, state) })
@@ -1719,7 +1897,7 @@ end
 
 P.onChange = function()
     invalidate()
-    notified = nil
+    notified = {}
     if StaticPopup_Hide then StaticPopup_Hide("BARSMITH_LEVEL_UPDATES") end
     if frame then
         local profile = P.active()
@@ -1754,7 +1932,10 @@ local function auditCreated(snapshot)
     snapshot.verifyCreatedOnLoad = nil
 end
 
-queueAutoFill = function()
+local queuedTopics = {}
+queueAutoFill = function(topic)
+    if not topic then queuedTopics = { spell = true, item = true, full = true }
+    elseif topic ~= "resume" then queuedTopics[topic] = true end
     if autoQueued then return end
     autoQueued = true
     C_Timer.After(1, function()
@@ -1767,7 +1948,9 @@ queueAutoFill = function()
         if InCombatLockdown() then autoAfterCombat = true; return end
         if GetCursorInfo() then autoAfterCursor = true; return end
         autoAfterCursor = false
-        BP.levelUpdates("event")
+        local topics = queuedTopics
+        queuedTopics = {}
+        BP.levelUpdates("event", topics)
     end)
 end
 
@@ -1775,7 +1958,7 @@ local events = CreateFrame("Frame")
 -- Not every client has every event (Classic Era has no LEARNED_SPELL_IN_TAB;
 -- newer clients call it LEARNED_SPELL_IN_SKILL_LINE),
 -- and registering an unknown one is an error that would stop the file here.
-for _, ev in ipairs({ "ADDON_LOADED", "PLAYER_ENTERING_WORLD", "SPELLS_CHANGED", "LEARNED_SPELL_IN_TAB", "LEARNED_SPELL_IN_SKILL_LINE", "BAG_UPDATE_DELAYED", "CURSOR_CHANGED", "PLAYER_REGEN_ENABLED" }) do
+for _, ev in ipairs({ "ADDON_LOADED", "PLAYER_ENTERING_WORLD", "SPELLS_CHANGED", "LEARNED_SPELL_IN_TAB", "LEARNED_SPELL_IN_SKILL_LINE", "BAG_UPDATE_DELAYED", "ACTIONBAR_SLOT_CHANGED", "CURSOR_CHANGED", "PLAYER_REGEN_ENABLED" }) do
     pcall(events.RegisterEvent, events, ev)
 end
 events:SetScript("OnEvent", function(_, event, arg1)
@@ -1790,12 +1973,19 @@ events:SetScript("OnEvent", function(_, event, arg1)
             if p.undo and p.undo.verifyCreatedOnLoad then auditSnapshot = p.undo end
         end
         queueAutoFill()
+    elseif event == "ACTIONBAR_SLOT_CHANGED" then
+        -- A specific physical slot becoming empty can re-arm refill. A bulk
+        -- display refresh (slot 0) or a spellbook event alone cannot undo a
+        -- placement we already verified. Wait for the normal leveling scan.
+        if fulfilled[arg1] and not HasAction(arg1) and not GetActionInfo(arg1) then
+            fulfilled[arg1] = nil
+        end
     elseif event == "CURSOR_CHANGED" then
-        if autoAfterCursor and not GetCursorInfo() then queueAutoFill() end
+        if autoAfterCursor and not GetCursorInfo() then queueAutoFill("resume") end
     elseif event == "PLAYER_REGEN_ENABLED" then
-        if autoAfterCombat then autoAfterCombat = false; queueAutoFill() end
+        if autoAfterCombat then autoAfterCombat = false; queueAutoFill("resume") end
     elseif BarsmithDB then
-        queueAutoFill()
+        queueAutoFill(event == "BAG_UPDATE_DELAYED" and "item" or "spell")
     end
 end)
 

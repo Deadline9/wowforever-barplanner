@@ -214,7 +214,23 @@ local function putMacro(name, value)
     end
 end
 
+local function displacedPrevious(slot, before)
+    local kind, id = GetCursorInfo()
+    if before.kind == "empty" then return kind == nil end
+    if kind ~= before.kind then return false end
+    if kind == "spell" then
+        local issue, _, competingBase = C.spellCursor(slot, before.id)
+        return not issue and not competingBase
+    end
+    if kind == "item" then return id == before.id end
+    if kind == "macro" and id and id > 0 then
+        return GetMacroInfo(id) == before.name and (id > (MAX_ACCOUNT_MACROS or 120)) == before.perChar
+    end
+    return false
+end
+
 local function write(op, value, pickup, receipt, book)
+    local spellDiagnostic, competingBase, actual
     if not op.slot then
         local index = putMacro(op.name, value)
         if receipt and type(index) == "number" and index > 0 then receipt.index = index end
@@ -225,19 +241,53 @@ local function write(op, value, pickup, receipt, book)
         local fn = pickup or C.pickup(value)
         assert(fn, "Action unavailable for slot " .. op.slot)
         fn()
-        local kind, id, _, spellID = GetCursorInfo()
-        local spellOK = kind ~= "spell" or not spellID or spellID == value.id
-        if kind == value.kind and not spellOK and C_SpellBook and C_SpellBook.FindSpellOverrideByID then
-            spellOK = spellID == C_SpellBook.FindSpellOverrideByID(value.id)
+        if value.kind == "spell" then
+            local request = value == op.after and op.requestedSpell or nil
+            local issue
+            issue, spellDiagnostic, competingBase = C.spellCursor(op.slot, value.id, request)
+            if issue then
+                local first = spellDiagnostic(issue)
+                ClearCursor()
+                if fn(true) ~= false then
+                    issue, spellDiagnostic, competingBase = C.spellCursor(op.slot, value.id, request)
+                    if issue then first = first .. "\nAlternate pickup: " .. spellDiagnostic(issue) end
+                end
+                if issue then error({ message = "Spell pickup failed on slot " .. op.slot .. ": " .. issue, details = { first } }, 0) end
+            end
+        else
+            local kind, id = GetCursorInfo()
+            assert(kind == value.kind and (kind ~= "item" or id == value.id)
+                and (kind ~= "macro" or (id and id > 0 and GetMacroInfo(id) == value.name
+                    and (id > (MAX_ACCOUNT_MACROS or 120)) == value.perChar)), "Pickup failed for slot " .. op.slot)
         end
-        assert(kind == value.kind and spellOK
-            and (kind ~= "item" or id == value.id)
-            and (kind ~= "macro" or (id and id > 0 and GetMacroInfo(id) == value.name
-                and (id > (MAX_ACCOUNT_MACROS or 120)) == value.perChar)), "Pickup failed for slot " .. op.slot)
         PlaceAction(op.slot)
+        if spellDiagnostic then
+            -- Verify while the displaced action is still on the cursor. If
+            -- the client stored a different spell, exchange it straight back
+            -- before the transaction unwinds earlier writes and bindings.
+            local ok, observed = pcall(C.read, op, book)
+            local kind, id = GetActionInfo(op.slot)
+            local why
+            if not ok then why = tostring(observed)
+            elseif observed.kind ~= "spell" or observed.id ~= value.id then
+                why = "stored " .. observed.kind .. " " .. tostring(observed.id)
+            elseif competingBase and (not C.slotContainsSpell(op.slot, value.id) or C.slotContainsSpell(op.slot, competingBase)) then
+                why = "cannot distinguish the requested variant from base " .. competingBase
+            end
+            if why then
+                if receipt and kind == "spell" and displacedPrevious(op.slot, op.before) then
+                    if op.before.kind == "empty" then PickupAction(op.slot) else PlaceAction(op.slot) end
+                end
+                ClearCursor()
+                local reason = ("physical slot verification failed (reported %s %s, %s, expected spell %d)")
+                    :format(tostring(kind), tostring(id), why, value.id)
+                error({ message = "Spell placement failed on slot " .. op.slot, details = { spellDiagnostic(reason) } }, 0)
+            end
+            actual = observed
+        end
         ClearCursor()
     end
-    local actual = C.read(op, book)
+    actual = actual or C.read(op, book)
     -- Legacy clients expose only the displayed texture. Accept the first
     -- resolution of a requested automatic icon, then compare it strictly.
     if not op.slot and value and actual and not (C_Macro and C_Macro.GetSelectedMacroIcon)
