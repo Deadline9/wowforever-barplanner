@@ -53,7 +53,7 @@ function P.setBarManaged(profile, first, managed)
     if P.managesSlot(profile, first) == managed then return end
     profile.excludedBars = profile.excludedBars or {}
     profile.excludedBars[first] = not managed or nil
-    if P.onBarsChanged then P.onBarsChanged() end
+    if P.onBarsChanged then P.onBarsChanged(first, managed) end
 end
 
 local function draft(source)

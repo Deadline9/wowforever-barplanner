@@ -1,0 +1,29 @@
+name: Barsmith regression tests
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+          npm install --prefix /tmp/barsmith-test jsdom@26
+      - name: Run addon tests
+        run: |
+          lua tools/tests/bindings.lua
+          lua tools/tests/profiles.lua
+      - name: Run planner tests
+        run: |
+          git show 3163d36:index.html > /tmp/barsmith-upstream.html
+          NODE_PATH=/tmp/barsmith-test/node_modules node tools/tests/planner.cjs /tmp/barsmith-upstream.html
