@@ -179,6 +179,23 @@ A generic guide never overrides the player's actual hand.
 
 If a guide says a key is excellent and the player says it hurts, the key is bad for that player.
 
+## Preference Authority Is Not Layout Authority
+
+Distinguish **physical/ergonomic evidence** from **hotbar-design opinions**.
+
+The player is authoritative about what feels comfortable, painful, reliable, confusing, or deeply practiced. The player is not automatically authoritative about which ability deserves a premium key, how the class should scale into later levels, or how the bars should be architected.
+
+Treat prior binding preferences as strong evidence only when they reflect:
+
+- real physical comfort or discomfort
+- substantial demonstrated muscle memory
+- a stable targeting or control method
+- a deliberate playstyle requirement
+
+For a new or inexperienced player, an earlier statement such as "I like this spell on X" may be only a provisional choice made without enough class knowledge to understand future competition for that key. Do not elevate such choices into protected requirements merely because they appeared in prior conversation.
+
+Recent or lightly practiced placements should usually be treated as flexible. Preserve the player's body and genuine habits; do not preserve accidental early-game architecture.
+
 ---
 
 # 6. Ergonomic Baseline: Use Gaming Hand Position, Not Touch Typing
@@ -940,6 +957,8 @@ Determine:
 
 Preserve the current export as the structural baseline.
 
+This means preserve the real slot/page structure, macro definitions, and live state needed for safe reconstruction. It does **not** mean that an occupied managed slot is visually immovable. Existing spell placement has preservation value only when it represents useful muscle memory or another concrete design reason.
+
 Do not invent a new SLOT or MACRO record syntax from memory. Use the actual current export or the current Barsmith specification as the template.
 
 ## Parse Binding Census
@@ -1033,6 +1052,8 @@ Optimize for:
 - short travel
 - minimal movement conflict
 
+Treat premium unmodified keys as a scarce budget. Before giving one to a long-cooldown, consumable, or situational action, compare that use against present and likely future rotational, reaction-critical, movement-concurrent, and control abilities. "Important" by itself is not enough to justify prime real estate.
+
 ## C. Place reaction-critical actions
 
 Examples:
@@ -1067,6 +1088,22 @@ These can tolerate greater reach or less desirable modifiers.
 These need not consume premium combat space.
 
 A visible clickable slot may sometimes be superior to wasting a valuable key.
+
+## I. Organize the Visible Bars
+
+Action-slot placement and key assignment are one design problem.
+
+Do not merely rebind whichever abilities happen to occupy existing slots. When managed slots are available, actively reorganize them so the visible bars reflect the control scheme.
+
+Where practical:
+
+- group related rotational actions together
+- keep defensives, movement, control, consumables, and utility in recognizable families
+- make visible button order correspond intelligibly to the physical key order
+- reserve intentional gaps only when they serve future abilities or readability
+- move an existing action when doing so materially improves coherence, unless real muscle memory argues otherwise
+
+The final result should look deliberate even before the player presses a key. A visually arbitrary sequence of bound buttons is evidence that the slot layout itself still needs work.
 
 ---
 
@@ -1197,6 +1234,8 @@ Call out:
 - reserved future abilities
 - pet-control decisions
 - unusual modifier choices
+
+Before presenting the proposal, perform a **visual coherence audit** of every managed bar the player will actually see. Check that ability families, button order, key labels, and reserved space form an understandable layout. If the visible sequence looks like historical accident rather than design, reorganize the slots before generating BP2.
 
 The human approves the concept.
 
@@ -1506,25 +1545,31 @@ The following must remain true throughout the process.
 
 8. **Ability priority includes urgency and failure consequence, not merely cast frequency.**
 
-9. **Existing muscle memory receives a preservation bias.**
+9. **Premium unmodified keys are a scarce resource; low-frequency cooldowns and consumables must justify their opportunity cost against present and future competitors.**
 
-10. **Cross-form, cross-spec, and cross-character semantic consistency is valuable but never absolute.**
+10. **Existing muscle memory receives a preservation bias, but novice or lightly practiced layout preferences do not automatically become protected architecture.**
 
-11. **Pet commands are combat abilities when pet management makes them combat-critical.**
+11. **Cross-form, cross-spec, and cross-character semantic consistency is valuable but never absolute.**
 
-12. **Click-casting and mouseover systems are considered when designing healer layouts.**
+12. **Managed action-slot placement and keybinding assignment are designed together; occupied slots are not inherently immovable.**
 
-13. **Current Forever mechanics must be researched rather than assumed from older WoW versions.**
+13. **The final managed bars should pass a visual coherence audit before BP2 is generated.**
 
-14. **Spell plans remain readable/name-first.**
+14. **Pet commands are combat abilities when pet management makes them combat-critical.**
 
-15. **Fresh Check is mandatory after every plan edit.**
+15. **Click-casting and mouseover systems are considered when designing healer layouts.**
 
-16. **Apply is never recommended after an unsuccessful or stale Check.**
+16. **Current Forever mechanics must be researched rather than assumed from older WoW versions.**
 
-17. **On multi-character accounts, confirm whether the active binding set is account-wide or character-specific before making class-specific binding changes.**
+17. **Spell plans remain readable/name-first.**
 
-18. **After changing binding scope, obtain a fresh Export setup + Binding Census before redesigning or generating a plan.**
+18. **Fresh Check is mandatory after every plan edit.**
+
+19. **Apply is never recommended after an unsuccessful or stale Check.**
+
+20. **On multi-character accounts, confirm whether the active binding set is account-wide or character-specific before making class-specific binding changes.**
+
+21. **After changing binding scope, obtain a fresh Export setup + Binding Census before redesigning or generating a plan.**
 
 ---
 
@@ -1617,13 +1662,17 @@ Determine each key's:
 
 ### Phase 7: Design
 
-Map ability requirements onto key properties.
+Map ability requirements onto key properties **and managed slot positions together**.
 
-Preserve useful existing bindings.
+Preserve useful existing bindings, not accidental slot occupancy.
 
 Seek semantic consistency.
 
 Reserve only justified future space.
+
+Organize the visible bars into a coherent layout rather than leaving existing abilities fixed and only changing their keys.
+
+Run a visual coherence audit before human review.
 
 ### Phase 8: Human review
 
