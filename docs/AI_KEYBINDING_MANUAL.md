@@ -248,13 +248,19 @@ These are defaults, not laws.
 
 ---
 
-# 8. Do Not Use a Universal Key Tier List
+# 8. Use the WASD Baseline, Then Adapt It
 
-There is no universal ordering such as:
+For a conventional left-hand WASD player with no contrary ergonomic evidence, use the [Conventional WASD Keybinding Baseline](WASD_KEYBIND_BASELINE.md) as the default starting model.
 
-`Q > E > F > 2 > R > Shift+Q`
+The baseline defines **Tier 1 through Tier 5** keybind real estate and default ability-to-tier targets. Use that vocabulary directly when useful.
 
-Key quality depends on what the player is doing when the key must be pressed.
+Do not start from an ergonomically blank slate. Nearby bare keys and reliable easy inputs are presumptively more valuable than distant or awkward chords, and Tier 1-2 real estate should normally be preserved for frequent or reaction-critical combat actions.
+
+The tier list is a baseline, not a law. Player-reported physical comfort, pain, movement technique, modifier reliability, mouse usage, and genuine established muscle memory can promote or demote keys.
+
+Do not treat a novice or lightly practiced spell/key preference as equivalent to ergonomic evidence.
+
+Within and across tiers, key quality still depends on what the player is doing when the key must be pressed.
 
 Evaluate candidate keys across several dimensions.
 
@@ -1648,8 +1654,11 @@ Determine each ability's:
 
 ### Phase 6: Classify keys
 
+For a conventional left-hand WASD player, begin with the Tier 1-5 model in [Conventional WASD Keybinding Baseline](WASD_KEYBIND_BASELINE.md), then adjust it from actual player evidence.
+
 Determine each key's:
 
+- baseline tier
 - physical reach
 - repetition comfort
 - movement conflict
