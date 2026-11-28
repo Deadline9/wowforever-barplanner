@@ -732,6 +732,8 @@ function slotHtml(slot, cmd) {
       const it = findItem(s.value);
       if (it) icon = it.i; else text = s.value;
       what = s.value;
+    } else if (s.kind === "outfit") {
+      text = "Outfit"; what = "Outfit ID " + s.value;
     } else if (s.kind === "clear") { cls += " clear"; what = "cleared by Apply"; }
   }
   if (sel && sel.slot === slot) cls += " sel";
@@ -876,7 +878,7 @@ function renderEditor() {
   }
   const info = slotInfo(sel.slot);
   const s = P().slots[sel.slot] || { kind: "", value: "" };
-  const kinds = [["", "Leave alone"], ["spell", "Spell"], ["macro", "Macro"], ["item", "Item"], ["clear", "Clear"]];
+  const kinds = [["", "Leave alone"], ["spell", "Spell"], ["macro", "Macro"], ["item", "Item"], ["outfit", "Outfit"], ["clear", "Clear"]];
   let body = "";
   if (s.kind === "spell") {
     body = `<label class="field">Spell<input type="text" id="val" list="spellList" value="${esc(baseName(s.value))}" placeholder="Lightning Bolt" spellcheck="false"></label><div id="rankBox">${rankSelect(s.value)}</div>`;
@@ -886,6 +888,8 @@ function renderEditor() {
     body = `<label class="field">Macro<input type="text" id="val" list="macroList" value="${esc(s.value)}" placeholder="macro name" spellcheck="false"></label><div id="macroActions">${macroActions(s.value)}</div>`;
   } else if (s.kind === "item") {
     body = `<label class="field">Item name or ID<input type="text" id="val" value="${esc(s.value)}" placeholder="Hearthstone, or item:6948" spellcheck="false"></label><p class="note" style="margin-top:-6px">Items by name are found once they're in your bags. <code>item:ID</code> always works.</p>`;
+  } else if (s.kind === "outfit") {
+    body = `<label class="field">Outfit ID<input type="text" inputmode="numeric" id="val" value="${esc(s.value)}"></label><p class="note">Use the internal ID from this character’s export. Check verifies availability in game.</p>`;
   } else if (s.kind === "clear") body = `<p class="note">Apply removes whatever is on this button.</p>`;
   else body = `<p class="note">Apply doesn't touch this button. Its key is still set if you give it one.</p>`;
   el.innerHTML = `<h2>${digits(info.label)}</h2><p class="meta">slot ${sel.slot} · ${info.command}</p>
@@ -961,7 +965,7 @@ function parse(text) {
     else if (f[0] === "RACE") race = unescField(f[1]);
     else if (f[0] === "NAME") p.name = unescField(f[1]);
     else if (f[0] === "MACRO" && f[1]) p.macros.push({ name: unescField(f[1]), icon: unescField(f[2]), perChar: f[3] === "1", body: unescField(f[4]) });
-    else if (f[0] === "SLOT" && slotInfo(+f[1]) && ["spell", "macro", "item", "clear"].includes(f[2])) p.slots[+f[1]] = { kind: f[2], value: unescField(f[3]).trim() };
+    else if (f[0] === "SLOT" && slotInfo(+f[1]) && ["spell", "macro", "item", "outfit", "clear"].includes(f[2])) p.slots[+f[1]] = { kind: f[2], value: unescField(f[3]).trim() };
     else if (["BIND", "ENSURE", "REMOVE", "ALLOWORPHAN"].includes(f[0])) {
       const ack = f[0] === "ALLOWORPHAN";
       if ((f[0] === "BIND") !== (p.version === 1) || f.length !== (ack ? 2 : 3) || f.some(v => !v)) throw new Error("Invalid binding record.");

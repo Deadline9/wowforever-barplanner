@@ -846,6 +846,14 @@ end
 local MACRO_NAME_MAX = 16
 local C, P = BP.changes, BP.profiles
 
+-- Forever distinguishes the internal outfitID from playerFacingOutfitIndex.
+local function outfitInfo(id)
+    local api = C_TransmogOutfitInfo
+    if type(id) ~= "number" or not api or type(api.GetOutfitInfo) ~= "function" or type(api.PickupOutfit) ~= "function" then return end
+    local info = api.GetOutfitInfo(id)
+    if info and info.outfitID == id and not info.isDisabled then return info end
+end
+
 function C.pickup(action)
     if action.kind == "spell" then
         if independentlyKnown(action.id) or exactBookIndex(action.id) then return spellTarget(action.id).pickup end
@@ -854,6 +862,8 @@ function C.pickup(action)
         end
     elseif action.kind == "item" and haveItem(action.id) then
         return function() pickupItem(action.id) end
+    elseif action.kind == "outfit" and outfitInfo(action.id) then
+        return function() C_TransmogOutfitInfo.PickupOutfit(action.id) end
     elseif action.kind == "macro" then
         local macro = C.macro(action.name)
         if macro and macro.perChar == action.perChar then
@@ -866,6 +876,11 @@ local function label(action)
     if action.kind == "empty" then return "empty" end
     if action.kind == "unresolvedMacro" then return "unlabelled macro reference (ID 0)" end
     if action.kind == "macro" then return "macro " .. action.name end
+    if action.kind == "outfit" then
+        local info = outfitInfo(action.id)
+        local identity = "outfit ID " .. tostring(action.id)
+        return info and info.name and (info.name .. " (" .. identity .. ")") or identity
+    end
     local name
     if action.kind == "spell" then name = getSpellName(action.id)
     elseif action.kind == "item" then name = getItemName(action.id) end
@@ -1027,6 +1042,10 @@ local function reviewPlan(plan, preview, profile, reapplying)
             if m then
                 after = { kind = "macro", name = m.name, perChar = m.perChar }
             else why = "no macro with that name" end
+        elseif s.kind == "outfit" then
+            local id = tonumber(s.value:match("^%d+$"))
+            after = before.kind == "outfit" and before.id == id and before or { kind = "outfit", id = id }
+            pickup = assert(C.pickup(after), slotWhere(s.slot) .. ": unavailable outfit ID " .. s.value)
         elseif s.kind == "spell" or s.kind == "item" then
             if before.kind == s.kind and s.value == s.kind .. ":" .. tostring(before.id) then
                 after = before
@@ -1227,7 +1246,36 @@ local function exportSpell(id, book)
     return "spell:" .. id
 end
 
-function BP.exportCurrent()
+local function exportSlot(slot, kind, id, book, plan, seenMacro)
+    local value
+    if kind == "spell" then
+        value = exportSpell(C.slotSpellID(slot, id, book), book)
+    elseif kind == "macro" then
+        local macro = C.slotMacro(slot)
+        value = macro.name
+        if not seenMacro[value] then
+            seenMacro[value] = true
+            table.insert(plan.macros, macro)
+        end
+    elseif kind == "item" then
+        local name = getItemName(id)
+        local target = name and resolveItem(name)
+        value = target and target.id == id and name or ("item:" .. id)
+    elseif kind == "outfit" and outfitInfo(id) then
+        value = tostring(id)
+    else
+        return false
+    end
+    table.insert(plan.slots, { slot = slot, kind = kind, value = value })
+    return true
+end
+
+local function observeSlot(rows, slot, kind, id, subtype, reason)
+    table.insert(rows, table.concat({ "OCCUPIED_SLOT", slot, esc(kind or "unknown"),
+        esc(id), esc(subtype), esc(reason) }, "\t"))
+end
+
+function BP.exportCurrent(observations)
     local _, class = UnitClass("player")
     local plan = { name = (UnitName("player") or "?") .. " (from game)", class = class,
         race = UnitRace and (UnitRace("player")) or nil, macros = {}, slots = {}, binds = {} }
@@ -1238,25 +1286,33 @@ function BP.exportCurrent()
     local explicit = {}
     if saved then for _, s in ipairs(saved.slots) do explicit[s.slot] = true end end
     local alternate = ALTERNATE_PAGES[class] or {}
+    local scanned = {}
     for _, p in ipairs(PAGES) do
         for i = 0, 11 do
             local slot = p.first + i
             if not alternate[p.first] or explicit[slot] then
-                local kind, id = GetActionInfo(slot)
-                if kind == "spell" then
-                    plan.slots[#plan.slots + 1] = { slot = slot, kind = kind, value = exportSpell(C.slotSpellID(slot, id, book), book) }
-                elseif kind == "macro" then
-                    local macro = C.slotMacro(slot)
-                    plan.slots[#plan.slots + 1] = { slot = slot, kind = "macro", value = macro.name }
-                    if not seenMacro[macro.name] then
-                        seenMacro[macro.name] = true
-                        plan.macros[#plan.macros + 1] = macro
+                local kind, id, subtype = GetActionInfo(slot)
+                if observations then
+                    scanned[slot] = true
+                    if kind or HasAction(slot) then
+                        local ok, exported = pcall(exportSlot, slot, kind, id, book, plan, seenMacro)
+                        if not ok or not exported then
+                            observeSlot(observations, slot, kind, id, subtype, ok and "unsupported or unavailable" or tostring(exported))
+                        end
                     end
-                elseif kind == "item" then
-                    local name = getItemName(id)
-                    local target = name and resolveItem(name)
-                    local value = target and target.id == id and name or ("item:" .. id)
-                    plan.slots[#plan.slots + 1] = { slot = slot, kind = kind, value = value }
+                elseif kind then
+                    exportSlot(slot, kind, id, book, plan, seenMacro)
+                end
+            end
+        end
+    end
+    if observations then
+        -- Include bonus and implicit form pages without adding executable destinations.
+        for slot = 1, 180 do
+            if not scanned[slot] then
+                local kind, id, subtype = GetActionInfo(slot)
+                if kind or HasAction(slot) then
+                    observeSlot(observations, slot, kind, id, subtype, "outside current setup export scope")
                 end
             end
         end
@@ -1492,6 +1548,7 @@ local function revertPlan(profile)
         C.checkDifferences(differences, where .. " changed since Apply.")
         if op.slot then
             requireRestorable(op.slot, op.before)
+            if applied.kind == "outfit" then requireRestorable(op.slot, applied) end
             if op.placedMacro and not editedMacros[op.placedMacro.name:lower()] then
                 C.differences(differences, where .. " / macro " .. op.placedMacro.name, op.placedMacro, C.macro(op.placedMacro.name))
                 C.checkDifferences(differences, "Placed slot macro changed: " .. op.placedMacro.name)
@@ -1696,6 +1753,22 @@ local function appliedPlan()
     if legacy and legacy ~= "" then return legacy, LEGACY_HELP end
 end
 
+function BP.exportBundle()
+    local observations = {}
+    local current = BP.exportCurrent(observations)
+    local _, character = P.active()
+    return table.concat({
+        "BARSMITH_EXPORT_BUNDLE\t1",
+        "CHARACTER\t" .. esc(character and character.name),
+        "PROFILE\t" .. esc(character and character.active),
+        "", "=== CURRENT SETUP ===", current,
+        "", "=== LAST APPLIED ===", appliedPlan() or "NONE",
+        "", "=== BINDING CENSUS ===", B.census(esc),
+        "", "=== OCCUPIED SLOTS OMITTED FROM CURRENT SETUP ===",
+        #observations > 0 and table.concat(observations, "\n") or "NONE",
+    }, "\n")
+end
+
 local function buildFrame()
     local f = CreateFrame("Frame", "BarsmithFrame", UIParent, "BasicFrameTemplateWithInset")
     f:SetSize(620, 558)
@@ -1820,7 +1893,12 @@ local function buildFrame()
         if not ok then showStatus({ "Census failed: " .. tostring(snapshot) }); return end
         selectText(snapshot, "Copy this read-only BC1 census. Load it into the planner with your plan open.")
     end)
-    button("Clear", 485, 55, function() loadEditor(""); edit:SetFocus() end)
+    button("AI export", 485, 72, function()
+        local ok, result = pcall(BP.exportBundle)
+        if not ok then return showStatus({ "AI export stopped: " .. tostring(result) }) end
+        selectText(result, "Press Ctrl+C to copy the bundle for your AI assistant. Paste the revised BP2 plan here for Check.")
+    end)
+    button("Clear", 561, 48, function() loadEditor(""); edit:SetFocus() end)
 
     tooltip(census, "Creates a read-only snapshot of current WoW keybindings, including detectable secondary and addon bindings. Use it with the planner or an AI assistant to avoid conflicts.")
 

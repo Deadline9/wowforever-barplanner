@@ -505,7 +505,7 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     assert(selector.Text:GetText() == "Default" and selector.width >= 300)
     -- Check the actual anchored control bounds at the fixed frame size.
     for _, labels in ipairs({
-        { "Check", "Apply", "Export setup", "Last applied plan", "Census", "Clear" },
+        { "Check", "Apply", "Export setup", "Last applied plan", "Census", "AI export", "Clear" },
         { "Save new", "Rename", "Duplicate", "Delete", "Managed bars..." },
         { "Review pending updates", "Revert last Apply", "Confirm", "Cancel" },
     }) do
@@ -593,9 +593,18 @@ test("real frame gates Apply, switches reports, and invalidates edits immediatel
     click("Export setup")
     assert(window.status.text:find("BP2 setup:", 1, true))
     assert(BP.parse(window.edit.text).name == "Tester (from game)")
+    local current = window.edit.text
     click("Census")
     assert(window.status.text:find("Copy this read-only BC1 census", 1, true))
     assert(window.edit.text:sub(1, 4) == "BC1:")
+    local census = window.edit.text
+    click("AI export")
+    assert(window.edit.selected == window.edit.text and not buttons.Apply.enabled)
+    assert(window.edit.text:find("=== CURRENT SETUP ===\n" .. current, 1, true))
+    assert(window.edit.text:find("=== BINDING CENSUS ===\n" .. census, 1, true))
+    assert(window.edit.text:find("=== LAST APPLIED ===\n" .. slotsOnly, 1, true))
+    click("Check")
+    assert(not buttons.Apply.enabled and window.status.text:find("Check BLOCKED", 1, true))
     click("Last applied plan")
     assert(window.status.text:find("Last applied plan. Press Ctrl+C", 1, true))
     assert(BP.profiles.active().lastApplied == slotsOnly and window.edit.text == slotsOnly and window.edit.selected == slotsOnly)
