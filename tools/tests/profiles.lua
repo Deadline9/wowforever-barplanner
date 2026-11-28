@@ -750,6 +750,141 @@ local function withAPI(api, run)
     assert(ok, err)
 end
 
+local outfits = {
+    GetOutfitInfo = function(id)
+        if id == 2 or id == 7 then
+            return { outfitID = id, name = "Travel", playerFacingOutfitIndex = 1, isDisabled = false }
+        end
+    end,
+    PickupOutfit = function(id) w.cursor = { "outfit", id } end,
+}
+
+test("outfit export, exact placement and Revert after reload", function()
+    withAPI({ C_TransmogOutfitInfo = outfits }, function()
+        char().slots[64] = { "outfit", 2 }
+        local action = BP.changes.slot(64)
+        assert(action.kind == "outfit" and action.id == 2)
+        local live = assert(BP.parse(BP.exportCurrent()))
+        assert(#live.slots == 1 and live.slots[1].slot == 64 and live.slots[1].value == "2" and live.slots[1].kind == "outfit")
+        local change = plan("SLOT\t64\toutfit\t7\nSLOT\t3\toutfit\t2")
+        local summary, _, details = BP.run(change, true)
+        has(summary, "Check OK")
+        has(details, "Travel (outfit ID 2)")
+        has(BP.run(change, false), "Done:")
+        assert(idAt(64) == 7 and idAt(3) == 2 and not w.cursor)
+        reload()
+        revert()
+        assert(idAt(64) == 2 and not HasAction(3))
+        apply(plan("SLOT\t64\tspell\tWrath"))
+        revert()
+        assert(BP.changes.slot(64).kind == "outfit" and idAt(64) == 2)
+    end)
+end)
+
+test("later write failure rolls back displaced outfit and bindings", function()
+    withAPI({ C_TransmogOutfitInfo = outfits }, function()
+        char().slots[64] = { "outfit", 2 }
+        w.rejectSlot = 3
+        local change = plan("SLOT\t64\tclear\t\nSLOT\t3\toutfit\t7\nENSURE\tR\tBUTTON")
+        has(BP.run(change, true), "Check OK")
+        has(BP.run(change, false), "Previous state restored")
+        assert(idAt(64) == 2 and not HasAction(3) and not w.cursor)
+        assert(w.keys.R == "RUN" and w.keys.NUMLOCK == "RUN" and not P.active().undo)
+    end)
+end)
+
+test("deleted outfit blocks Revert before other undo operations", function()
+    local change = plan("SLOT\t64\tclear\t\nSLOT\t3\tspell\tWrath")
+    char().slots[64] = { "outfit", 2 }
+    withAPI({ C_TransmogOutfitInfo = outfits }, function() apply(change) end)
+    local snapshot = P.active().undo
+    has(BP.revert(false), "cannot restore outfit ID 2")
+    assert(P.active().undo == snapshot and not HasAction(64) and idAt(3) == 5 and not w.cursor)
+    withAPI({ C_TransmogOutfitInfo = outfits }, revert)
+    assert(idAt(64) == 2 and not HasAction(3))
+end)
+
+test("outfit pickup and physical verification reject a different ID", function()
+    char().slots[64] = { "outfit", 2 }
+    local change = plan("SLOT\t64\toutfit\t7")
+    withAPI({ C_TransmogOutfitInfo = { GetOutfitInfo = outfits.GetOutfitInfo,
+        PickupOutfit = function(id) w.cursor = { "outfit", id == 2 and 2 or 3 } end } }, function()
+        has(BP.run(change, true), "Check OK")
+        has(BP.run(change, false), "Pickup failed")
+        assert(idAt(64) == 2 and not w.cursor and not P.active().undo)
+    end)
+    local place = PlaceAction
+    withAPI({ C_TransmogOutfitInfo = outfits, PlaceAction = function(slot)
+        if w.cursor[2] == 7 then w.cursor[2] = 3 end
+        place(slot)
+    end }, function()
+        has(BP.run(change, true), "Check OK")
+        has(BP.run(change, false), "Previous state restored")
+        assert(idAt(64) == 2 and not w.cursor and not P.active().undo)
+    end)
+end)
+
+test("unavailable outfit, missing APIs and unidentifiable cursor fail safely", function()
+    char().slots[64] = { "outfit", 2 }
+    local clear = plan("SLOT\t64\tclear\t\nENSURE\tR\tBUTTON")
+    for _, api in ipairs({ {}, { GetOutfitInfo = outfits.GetOutfitInfo }, { PickupOutfit = outfits.PickupOutfit },
+        { PickupOutfit = outfits.PickupOutfit, GetOutfitInfo = function() return { outfitID = 7 } end },
+        { PickupOutfit = outfits.PickupOutfit, GetOutfitInfo = function(id) return { outfitID = id, isDisabled = true } end } }) do
+        withAPI({ C_TransmogOutfitInfo = api }, function()
+            has(BP.run(clear, true), "cannot restore outfit ID 2")
+            has(BP.run(plan("SLOT\t64\toutfit\t2"), true), "unavailable outfit ID")
+            assert(#BP.parse(BP.exportCurrent()).slots == 0)
+            assert(BP.exportBundle():find("OCCUPIED_SLOT\t64\toutfit\t2", 1, true))
+        end)
+    end
+    withAPI({ C_TransmogOutfitInfo = outfits }, function()
+        for _, value in ipairs({ "999", "Travel", "2.5" }) do
+            has(BP.run(plan("SLOT\t3\toutfit\t" .. value), true), "unavailable outfit ID")
+        end
+        has(BP.run(clear, true), "Check OK")
+    end)
+    withAPI({ C_TransmogOutfitInfo = { GetOutfitInfo = outfits.GetOutfitInfo,
+        PickupOutfit = function() w.cursor = { "outfit" } end } }, function()
+        has(BP.run(clear, false), "Cannot verify pickup")
+        assert(idAt(64) == 2 and not w.cursor and w.saves == 0 and not P.active().undo)
+    end)
+end)
+
+test("AI bundle distinguishes occupancy, export scope and stored plan precedence", function()
+    local profile = P.active()
+    local current = BP.exportCurrent()
+    local empty = BP.exportBundle()
+    assert(empty:find("=== CURRENT SETUP ===\n" .. current, 1, true))
+    assert(empty:find("=== LAST APPLIED ===\nNONE", 1, true) and empty:match("===\nNONE$"))
+    local saved = " " .. plan("SLOT\t1\tspell\tDash") .. "\n"
+    local legacy, newer = plan("NAME\tOlder"), plan("NAME\tNewer")
+    BarsmithDB.legacyPlan, BarsmithDB.last = legacy, newer
+    profile.lastApplied = saved
+    char().slots[64], char().slots[121] = { "flyout", 9, "test" }, { "mount", 42 }
+    char().slots[5] = {}
+    local read = GetActionInfo
+    withAPI({ GetActionInfo = function(slot)
+        if slot == 64 then return unpack(char().slots[slot]) end
+        return read(slot)
+    end }, function()
+        local bundle = BP.exportBundle()
+        assert(bundle:find("CHARACTER\tSeren\nPROFILE\tDefault", 1, true))
+        assert(bundle:find("=== LAST APPLIED ===\n" .. saved .. "\n\n", 1, true))
+        assert(bundle:find("OCCUPIED_SLOT\t64\tflyout\t9\ttest", 1, true))
+        assert(bundle:find("OCCUPIED_SLOT\t5\tunknown\t", 1, true))
+        assert(bundle:find("OCCUPIED_SLOT\t121\tmount\t42", 1, true))
+        assert(not BP.parse(bundle) and not BP.parse(plan("OCCUPIED_SLOT\t64\tflyout\t9")))
+        assert(#BP.parse(BP.exportCurrent()).slots == 0)
+        has(BP.run(plan("SLOT\t64\tflyout\t9"), true), "Unknown slot type")
+        has(BP.run(plan("SLOT\t64\tclear\t"), true), "cannot restore flyout")
+        profile.lastApplied = ""
+        assert(BP.exportBundle():find("=== LAST APPLIED ===\n" .. newer, 1, true))
+        BarsmithDB.last = ""
+        assert(BP.exportBundle():find("=== LAST APPLIED ===\n" .. legacy, 1, true))
+        assert(idAt(64) == 9 and idAt(121) == 42 and not w.cursor and not profile.undo and w.saves == 0)
+    end)
+end)
+
 local selected = { GetSelectedMacroIcon = function(index)
     local name = GetMacroInfo(index)
     return name and w.macros[name].icon

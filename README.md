@@ -14,7 +14,7 @@ This BP2 fork builds on [Barsmith by Ruben (rubensayshi)](https://github.com/rub
 
 ## Designing bars and keybindings with an AI assistant
 
-Give your assistant the [AI Action-Bar & Keybinding Design Manual](docs/AI_KEYBINDING_MANUAL.md) and two separate strings from `/barsmith`. **Export setup** (BP2) supplies your action slots, macros, and supported keybindings. **Census** (BC1) supplies a read-only binding snapshot so the assistant can check proposed keys for collisions. After reviewing the layout, paste the proposed BP2 plan into Barsmith and run **Check** before **Apply**.
+For an established profile, click **AI export** in `/barsmith`, press Ctrl+C, and give the bundle to your assistant with the [AI Action-Bar & Keybinding Design Manual](docs/AI_KEYBINDING_MANUAL.md). It contains the current setup, the exact last applied plan when available, the binding census, and observations of occupied slots omitted from the setup. Paste the assistant’s revised BP2 into Barsmith and run **Check** before **Apply**.
 
 ## Getting it into the game
 
@@ -106,6 +106,8 @@ The game client is the authority. The web preview uses the snapshot attached to 
 ## Binding plans and compatibility
 
 Both plan versions use a prefix followed by base64-encoded UTF-8. Each decoded line contains tab-separated fields. The original escaping for backslash, tab and newline also applies to BP2 binding fields. SLOT, MACRO, CLASS, NAME and RACE retain their existing syntax. Spells accept names, ranks or `spell:ID`. Items accept names or `item:ID`.
+
+For an available outfit, `SLOT <slot> outfit <ID>` uses the internal numeric ID on the originating character. Forever exposes its name and player-facing index separately. Check verifies local availability. Before displacing an outfit, the transaction verifies that a fresh pickup carries its exact ID. Apply and Revert also verify the physical destination. An unavailable outfit stays protected and appears in the bundle’s occupancy observations. [Forever 1.60.1 build 71139 outfit API](https://github.com/Gethe/wow-ui-source/blob/d9c22e32cb240afb82bb2ecefbb78ef935333f59/Interface/AddOns/Blizzard_APIDocumentationGenerated/TransmogOutfitInfoDocumentation.lua)
 
 | Prefix and header | Binding records | Behavior |
 |---|---|---|

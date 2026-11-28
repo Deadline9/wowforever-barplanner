@@ -222,7 +222,7 @@ local function displacedPrevious(slot, before)
         local issue, _, competingBase = C.spellCursor(slot, before.id)
         return not issue and not competingBase
     end
-    if kind == "item" then return id == before.id end
+    if kind == "item" or kind == "outfit" then return id == before.id end
     if kind == "macro" and id and id > 0 then
         return GetMacroInfo(id) == before.name and (id > (MAX_ACCOUNT_MACROS or 120)) == before.perChar
     end
@@ -256,12 +256,22 @@ local function write(op, value, pickup, receipt, book)
             end
         else
             local kind, id = GetCursorInfo()
-            assert(kind == value.kind and (kind ~= "item" or id == value.id)
+            assert(kind == value.kind and ((kind ~= "item" and kind ~= "outfit") or id == value.id)
                 and (kind ~= "macro" or (id and id > 0 and GetMacroInfo(id) == value.name
                     and (id > (MAX_ACCOUNT_MACROS or 120)) == value.perChar)), "Pickup failed for slot " .. op.slot)
         end
         PlaceAction(op.slot)
-        if spellDiagnostic then
+        if value.kind == "outfit" then
+            actual = C.read(op, book)
+            if actual.kind ~= "outfit" or actual.id ~= value.id then
+                -- The old action is still on the cursor after a swap.
+                if receipt and actual.kind == "outfit" and displacedPrevious(op.slot, op.before) then
+                    if op.before.kind == "empty" then PickupAction(op.slot) else PlaceAction(op.slot) end
+                end
+                error(("Slot %d reported %s %s after placing outfit ID %d")
+                    :format(op.slot, actual.kind, tostring(actual.id), value.id))
+            end
+        elseif spellDiagnostic then
             -- Verify while the displaced action is still on the cursor. If
             -- the client stored a different spell, exchange it straight back
             -- before the transaction unwinds earlier writes and bindings.
@@ -344,6 +354,21 @@ end
 -- Both Apply and confirmed Revert enter here after a read-only preflight.
 -- Reverse completed operations if a later game call rejects the batch.
 function C.execute(ops, plan, preview, pickups, macroChecks)
+    -- Metadata alone cannot prove this client's cursor returns a restorable
+    -- ID. Probe a fresh copy before displacing an outfit or writing bindings.
+    for _, op in ipairs(ops) do
+        if op.slot and op.before.kind == "outfit" then
+            assert(not GetCursorInfo(), "Empty the cursor before checking outfit pickup.")
+            local pickup = assert(C.pickup(op.before), "Outfit unavailable for slot " .. op.slot)
+            local ok, matches = pcall(function()
+                pickup()
+                return displacedPrevious(op.slot, op.before)
+            end)
+            ClearCursor()
+            assert(ok, matches)
+            assert(matches and not GetCursorInfo(), "Cannot verify pickup of outfit ID " .. op.before.id .. " for slot " .. op.slot)
+        end
+    end
     local book
     for _, op in ipairs(ops) do
         if op.slot and (op.before.kind == "spell" or op.after.kind == "spell") then book = C.spellbookEntries(); break end

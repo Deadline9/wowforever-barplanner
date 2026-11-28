@@ -48,6 +48,9 @@ if (legacy) {
 plan("SLOT\t109\tclear\t", "SLOT\t85\tspell\tGhost Wolf");
 const alternateSlots = Buffer.from(el("out").value.slice(4), "base64").toString();
 assert.ok(alternateSlots.includes("SLOT\t109\tclear\t") && alternateSlots.includes("SLOT\t85\tspell\tGhost Wolf"));
+plan("SLOT\t64\toutfit\t2");
+assert.ok(Buffer.from(el("out").value.slice(4), "base64").toString().includes("SLOT\t64\toutfit\t2"));
+assert.match(w.document.querySelector('[data-slot="64"]').getAttribute("aria-label"), /Outfit ID 2/);
 plan("ENSURE\tR\tRUN");
 census(row("RUN", "R", "NUMLOCK"));
 check("Preserved on RUN: NUMLOCK");

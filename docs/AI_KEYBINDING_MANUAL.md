@@ -1585,6 +1585,10 @@ When beginning a new character or redesign, follow this sequence:
 
 ### Phase 1: Acquire state
 
+For an established profile, prefer one fresh **AI export** from `/barsmith` when available. **Current Setup** reconstructs the live bars. **Last Applied** preserves the exact deliberate plan, including clears and future spell reservations. **Binding Census** supplies the surrounding binding environment. Compare all three before revising the layout. `NONE` under Last Applied means no stored plan was available.
+
+Read **Occupied slots omitted from Current Setup** before claiming space. Each observation gives the physical slot, action kind, ID, subtype and omission reason. Preserve these occupied slots unless the player deliberately moves their contents. An outfit placement uses the internal ID from this character’s export. Return a standalone BP2 plan for review. **Check remains the final live verification before Apply.**
+
 Obtain:
 
 - current Export setup
